@@ -8,7 +8,7 @@ This project was built for **DAMO630 – Advanced Data Analytics** at the Master
 
 ## 📖 Course Modules Integrated
 
-1. **Mining Data Streams (Week 3-4):** Implements a PySpark Structured Streaming read stream monitoring an active ingestion folder (`/mnt/tweets/incoming/`). A background thread chunker divides the Twitter financial dataset into micro-batches to emulate a live, high-frequency JSON API feed.
+1. **Mining Data Streams (Week 3-4):** Implements a PySpark Structured Streaming read stream monitoring an active ingestion folder (`/FileStore/tweets/incoming/`). A background thread chunker divides the Twitter financial dataset into micro-batches to emulate a live, high-frequency JSON API feed.
 2. **Natural Language Processing (NLP) (Week 5):** Uses Spark SQL regex transformation functions to normalize raw tweet text (scrubbing URLs, user handles, trailing emojis, and punctuation) in parallel prior to sentiment classification.
 3. **Sentiment Analysis (Week 6):** Deploys NLTK's **VADER (Valence Aware Dictionary and sEntiment Reasoner)** inside a Spark Pandas UDF (User Defined Function). Polarity scores (positive, negative, neutral, and compound) are inferred on worker nodes.
 4. **Statistical Signal Analytics (Advanced Application):** Computes a log-weighted **Weighted Sentiment Index (WSI)** incorporating follower counts. A rolling Z-score tracks negative sentiment variance over a sliding 10-window range to trigger automated **BUY**, **SELL**, or **HOLD** decisions when negativity crosses a critical $+2.5\sigma$ panic threshold.
@@ -24,7 +24,7 @@ This project was built for **DAMO630 – Advanced Data Analytics** at the Master
                                 |    (Reads Kaggle CSV -> JSONs)   |
                                 +-----------------+----------------+
                                                   |
-                                                  v (dbfs:/mnt/tweets/incoming)
+                                                  v (dbfs:/FileStore/tweets/incoming)
                                 +-----------------+----------------+
                                 | 2. PySpark Structured Stream    |
                                 |    (Reads JSONs as live stream)  |
