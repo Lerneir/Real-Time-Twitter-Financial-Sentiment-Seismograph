@@ -64,6 +64,24 @@ import random
 # Global stop event to manage background thread
 stop_event = threading.Event()
 
+# Resolve workspace paths dynamically to comply with Databricks security policies
+notebook_dir = os.getcwd()
+if "/Workspace" in notebook_dir:
+    # Running inside Databricks Repos
+    repo_root = os.path.dirname(notebook_dir)
+    workspace_tmp_dir = os.path.join(repo_root, "tmp")
+else:
+    # Local fallback
+    workspace_tmp_dir = os.path.abspath("./tmp")
+
+incoming_dir = os.path.join(workspace_tmp_dir, "tweets", "incoming")
+checkpoint_dir = "file:" + os.path.join(workspace_tmp_dir, "tweets", "checkpoints")
+dbfs_csv_path = os.path.join(workspace_tmp_dir, "tweets", "aggregated_metrics.csv")
+
+# Ensure directories exist
+os.makedirs(incoming_dir, exist_ok=True)
+os.makedirs(os.path.dirname(dbfs_csv_path), exist_ok=True)
+
 def run_chunker(csv_path, output_dir, chunk_size, interval):
     print(f"[EMULATOR] Thread started. Reading source: {csv_path}...")
     try:
@@ -79,7 +97,7 @@ def run_chunker(csv_path, output_dir, chunk_size, interval):
         else:
             real_csv_path = "/dbfs" + csv_path if csv_path.startswith("/") else f"/dbfs/{csv_path}"
             
-        if output_dir.startswith("/tmp"):
+        if output_dir.startswith("/tmp") or "/Workspace" in output_dir:
             real_output_dir = output_dir
         else:
             real_output_dir = output_dir.replace("dbfs:", "/dbfs") if output_dir.startswith("dbfs:") else output_dir
@@ -142,7 +160,13 @@ def run_chunker(csv_path, output_dir, chunk_size, interval):
     except Exception as e:
         print(f"[EMULATOR] Error in stream emulator thread: {e}")
 
-def start_emulator(csv_path, output_dir="/tmp/tweets/incoming", chunk_size=50, interval=10):
+def start_emulator(csv_path, output_dir=None, chunk_size=50, interval=10):
+    global stop_event
+    stop_event.clear()
+    
+    # Use dynamically resolved incoming directory if not specified
+    if output_dir is None:
+        output_dir = incoming_dir
     global stop_event
     stop_event.clear()
     
@@ -190,7 +214,7 @@ raw_stream = (spark.readStream
               .format("json")
               .schema(schema)
               .option("maxFilesPerTrigger", 1)
-              .load("file:/tmp/tweets/incoming/"))
+              .load("file:" + incoming_dir))
 
 # Clean tweets: remove URLs, handles, punctuation, keep currency symbols ($)
 cleaned_stream = (raw_stream
@@ -276,7 +300,6 @@ aggregated_stream = (weighted_stream
 import os
 
 # Create DBFS local storage path for metrics
-dbfs_csv_path = "/tmp/tweets/aggregated_metrics.csv"
 os.makedirs(os.path.dirname(dbfs_csv_path), exist_ok=True)
 
 class BatchProcessor:
