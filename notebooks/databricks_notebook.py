@@ -42,64 +42,12 @@ dbutils.widgets.text("github_repo", "username/repo", "GitHub Repository (owner/r
 dbutils.widgets.text("github_branch", "main", "GitHub Branch")
 dbutils.widgets.text("github_file_path", "aggregated_metrics.csv", "GitHub File Path")
 dbutils.widgets.text("csv_source_path", "../data/train_data.csv", "Source CSV Path (DBFS or relative repo path)")
-dbutils.widgets.text("kaggle_username", "", "Kaggle Username (Optional for dataset download)")
-dbutils.widgets.text("kaggle_key", "", "Kaggle API Key (Optional for dataset download)")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ### Cell 1.5: Kaggle Dataset Downloader
-# MAGIC If you provide your Kaggle API credentials above, this cell will automatically download the real-time financial tweets dataset and extract it to DBFS at `/FileStore/tables/train_data.csv`.
-# MAGIC *(To get your credentials, log into Kaggle, go to Account Settings, and click "Create New API Token" to download kaggle.json).*
-
-# COMMAND ----------
-
-kaggle_user = dbutils.widgets.get("kaggle_username")
-kaggle_key = dbutils.widgets.get("kaggle_key")
-
-if kaggle_user and kaggle_key:
-    import os
-    import json
-    import subprocess
-    import zipfile
-    
-    # Setup local folder and write credentials json
-    kaggle_dir = os.path.expanduser("~/.kaggle")
-    os.makedirs(kaggle_dir, exist_ok=True)
-    with open(os.path.join(kaggle_dir, "kaggle.json"), "w") as f:
-        json.dump({"username": kaggle_user, "key": kaggle_key}, f)
-    os.chmod(os.path.join(kaggle_dir, "kaggle.json"), 0o600)
-    
-    print("[KAGGLE] Downloading dataset 'sulphatet/twitter-financial-news'...")
-    try:
-        os.makedirs("/tmp/kaggle", exist_ok=True)
-        subprocess.run([
-            "kaggle", "datasets", "download", 
-            "-d", "sulphatet/twitter-financial-news", 
-            "-p", "/tmp/kaggle", 
-            "--force"
-        ], check=True)
-        
-        target_extract_dir = "/dbfs/FileStore/tables"
-        os.makedirs(target_extract_dir, exist_ok=True)
-        
-        zip_path = "/tmp/kaggle/twitter-financial-news.zip"
-        with zipfile.ZipFile(zip_path, "r") as zip_ref:
-            zip_ref.extractall(target_extract_dir)
-            
-        print(f"[KAGGLE] Success! Dataset extracted to {target_extract_dir}")
-        print("Set your 'csv_source_path' widget to `/FileStore/tables/train_data.csv` to run the full dataset.")
-    except Exception as e:
-        print(f"[KAGGLE ERROR] Failed to download dataset: {e}")
-else:
-    print("[KAGGLE INFO] Kaggle credentials not provided. Skipping automated dataset download.")
-    print("Using default 'csv_source_path' relative repository fallback.")
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ### Cell 2: Live Ingestion Stream Emulator (Background Thread)
-# MAGIC Emulates a live streaming tweet API by breaking the Kaggle CSV into batches of 50 tweets and saving them as JSON files in `/FileStore/tweets/incoming/` at set intervals.
+# MAGIC Emulates a live streaming tweet API by breaking the Kaggle CSV into batches of 50 tweets and saving them as JSON files in `/tmp/tweets/incoming/` at set intervals.
 
 # COMMAND ----------
 
@@ -128,9 +76,12 @@ def run_chunker(csv_path, output_dir, chunk_size, interval):
         else:
             real_csv_path = "/dbfs" + csv_path if csv_path.startswith("/") else f"/dbfs/{csv_path}"
             
-        real_output_dir = output_dir.replace("dbfs:", "/dbfs") if output_dir.startswith("dbfs:") else output_dir
-        if not real_output_dir.startswith("/dbfs") and real_output_dir.startswith("/"):
-            real_output_dir = "/dbfs" + real_output_dir
+        if output_dir.startswith("/tmp"):
+            real_output_dir = output_dir
+        else:
+            real_output_dir = output_dir.replace("dbfs:", "/dbfs") if output_dir.startswith("dbfs:") else output_dir
+            if not real_output_dir.startswith("/dbfs") and real_output_dir.startswith("/"):
+                real_output_dir = "/dbfs" + real_output_dir
             
         os.makedirs(real_output_dir, exist_ok=True)
         
@@ -188,7 +139,7 @@ def run_chunker(csv_path, output_dir, chunk_size, interval):
     except Exception as e:
         print(f"[EMULATOR] Error in stream emulator thread: {e}")
 
-def start_emulator(csv_path, output_dir="/FileStore/tweets/incoming", chunk_size=50, interval=10):
+def start_emulator(csv_path, output_dir="/tmp/tweets/incoming", chunk_size=50, interval=10):
     global stop_event
     stop_event.clear()
     
@@ -236,7 +187,7 @@ raw_stream = (spark.readStream
               .format("json")
               .schema(schema)
               .option("maxFilesPerTrigger", 1)
-              .load("/FileStore/tweets/incoming/"))
+              .load("file:/tmp/tweets/incoming/"))
 
 # Clean tweets: remove URLs, handles, punctuation, keep currency symbols ($)
 cleaned_stream = (raw_stream
@@ -324,7 +275,7 @@ import base64
 import os
 
 # Create DBFS local storage path for metrics
-dbfs_csv_path = "/dbfs/FileStore/tweets/aggregated_metrics.csv"
+dbfs_csv_path = "/tmp/tweets/aggregated_metrics.csv"
 os.makedirs(os.path.dirname(dbfs_csv_path), exist_ok=True)
 
 def push_to_github(csv_content, token, repo, branch, file_path):
@@ -416,7 +367,7 @@ def process_batch(df, batch_id):
 # COMMAND ----------
 
 # Start Streaming Query
-checkpoint_dir = "/FileStore/tweets/checkpoints"
+checkpoint_dir = "file:/tmp/tweets/checkpoints"
 
 query = (aggregated_stream.writeStream
          .foreachBatch(process_batch)
