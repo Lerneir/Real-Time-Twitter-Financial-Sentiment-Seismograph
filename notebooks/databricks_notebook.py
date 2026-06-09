@@ -44,7 +44,10 @@ dbutils.widgets.text("github_file_path", "aggregated_metrics.csv", "GitHub File 
 dbutils.widgets.text("csv_source_path", "../data/train_data.csv", "Source CSV Path (DBFS or relative repo path)")
 
 # COMMAND ----------
+%restart_python
+# COMMAND ----------
 
+# COMMAND ----------
 # MAGIC %md
 # MAGIC ### Cell 2: Live Ingestion Stream Emulator (Background Thread)
 # MAGIC Emulates a live streaming tweet API by breaking the Kaggle CSV into batches of 50 tweets and saving them as JSON files in `/tmp/tweets/incoming/` at set intervals.
@@ -270,107 +273,133 @@ aggregated_stream = (weighted_stream
 
 # COMMAND ----------
 
-import requests
-import base64
 import os
 
 # Create DBFS local storage path for metrics
 dbfs_csv_path = "/tmp/tweets/aggregated_metrics.csv"
 os.makedirs(os.path.dirname(dbfs_csv_path), exist_ok=True)
 
-def push_to_github(csv_content, token, repo, branch, file_path):
-    if not token or not repo or repo == "username/repo":
-        print("[GITHUB SYNC] GitHub credentials not fully configured. Skipping repository update.")
-        return
-        
-    url = f"https://api.github.com/repos/{repo}/contents/{file_path}"
-    headers = {
-        "Authorization": f"token {token}",
-        "Accept": "application/vnd.github.v3+json"
-    }
-    
-    # 1. Fetch current file SHA if it exists
-    params = {"ref": branch} if branch else {}
-    sha = None
-    r = requests.get(url, headers=headers, params=params)
-    if r.status_code == 200:
-        sha = r.json().get("sha")
-        
-    # 2. Build upload payload
-    content_b64 = base64.b64encode(csv_content.encode("utf-8")).decode("utf-8")
-    payload = {
-        "message": "Update aggregated financial sentiment seismograph metrics",
-        "content": content_b64,
-        "branch": branch
-    }
-    if sha:
-        payload["sha"] = sha
-        
-    put_r = requests.put(url, headers=headers, json=payload)
-    if put_r.status_code in [200, 201]:
-        print(f"[GITHUB SYNC] Successfully committed and pushed updated metrics to {repo}/{file_path}")
-    else:
-        print(f"[GITHUB SYNC] GitHub API Error ({put_r.status_code}): {put_r.text}")
+class BatchProcessor:
+    def __init__(self, csv_path, token, repo, branch, file_path):
+        self.csv_path = csv_path
+        self.token = token
+        self.repo = repo
+        self.branch = branch
+        self.file_path = file_path
 
-def process_batch(df, batch_id):
-    if df.isEmpty():
-        return
+    def push_to_github(self, csv_content):
+        import requests
+        import base64
         
-    print(f"\n--- Processing Micro-Batch: {batch_id} ---")
-    pdf = df.toPandas()
-    
-    # Unpack window struct
-    pdf['window_start'] = pdf['window'].apply(lambda w: w[0] if w else None)
-    pdf['window_end'] = pdf['window'].apply(lambda w: w[1] if w else None)
-    pdf = pdf.drop(columns=['window'])
-    
-    # Load previously accumulated metrics to maintain historic trend
-    if os.path.exists(dbfs_csv_path):
+        if not self.token or not self.repo or self.repo == "username/repo":
+            print("[GITHUB SYNC] GitHub credentials not fully configured. Skipping repository update.")
+            return
+            
+        url = f"https://api.github.com/repos/{self.repo}/contents/{self.file_path}"
+        headers = {
+            "Authorization": f"token {self.token}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+        
+        # 1. Fetch current file SHA if it exists
+        params = {"ref": self.branch} if self.branch else {}
+        sha = None
         try:
-            old_pdf = pd.read_csv(dbfs_csv_path)
-            # Ensure timestamp columns are parsed identically
-            pdf['window_start'] = pd.to_datetime(pdf['window_start']).dt.tz_localize(None)
-            old_pdf['window_start'] = pd.to_datetime(old_pdf['window_start']).dt.tz_localize(None)
-            
-            # Combine, drop duplicates keeping the most recent calculation, and sort
-            combined_pdf = pd.concat([old_pdf, pdf]).drop_duplicates(subset=['window_start'], keep='last')
-            pdf = combined_pdf.sort_values(by='window_start').reset_index(drop=True)
+            r = requests.get(url, headers=headers, params=params)
+            if r.status_code == 200:
+                sha = r.json().get("sha")
         except Exception as e:
-            print(f"[BATCH PROCESS] Failed to merge with existing CSV history: {e}")
+            print(f"[GITHUB SYNC] Error fetching SHA from GitHub API: {e}")
+            return
             
-    # Calculate Z-Score of negative sentiment over the last 10 windows
-    if len(pdf) >= 2:
-        rolling_mean = pdf['avg_neg'].rolling(window=10, min_periods=1).mean()
-        rolling_std = pdf['avg_neg'].rolling(window=10, min_periods=1).std().fillna(1e-5)
-        pdf['z_score'] = (pdf['avg_neg'] - rolling_mean) / rolling_std
-    else:
-        pdf['z_score'] = 0.0
+        # 2. Build upload payload
+        content_b64 = base64.b64encode(csv_content.encode("utf-8")).decode("utf-8")
+        payload = {
+            "message": "Update aggregated financial sentiment seismograph metrics",
+            "content": content_b64,
+            "branch": self.branch
+        }
+        if sha:
+            payload["sha"] = sha
+            
+        try:
+            put_r = requests.put(url, headers=headers, json=payload)
+            if put_r.status_code in [200, 201]:
+                print(f"[GITHUB SYNC] Successfully committed and pushed updated metrics to {self.repo}/{self.file_path}")
+            else:
+                print(f"[GITHUB SYNC] GitHub API Error ({put_r.status_code}): {put_r.text}")
+        except Exception as e:
+            print(f"[GITHUB SYNC] Exception occurred during file upload: {e}")
+
+    def __call__(self, df, batch_id):
+        if df.isEmpty():
+            return
+            
+        print(f"\n--- Processing Micro-Batch: {batch_id} ---")
+        pdf = df.toPandas()
         
-    # Keep only the last 100 windows to conserve dashboard performance and stay within API constraints
-    pdf = pdf.tail(100)
-    
-    # Save back to DBFS local cache
-    pdf.to_csv(dbfs_csv_path, index=False)
-    print(f"[BATCH PROCESS] Saved metrics locally. Row count: {len(pdf)}")
-    
-    # Push updated CSV content to GitHub
-    csv_string = pdf.to_csv(index=False)
-    
-    # Fetch widgets credentials
-    git_token = dbutils.widgets.get("github_token")
-    git_repo = dbutils.widgets.get("github_repo")
-    git_branch = dbutils.widgets.get("github_branch")
-    git_file = dbutils.widgets.get("github_file_path")
-    
-    push_to_github(csv_string, git_token, git_repo, git_branch, git_file)
+        # Unpack window struct
+        pdf['window_start'] = pdf['window'].apply(lambda w: w[0] if w else None)
+        pdf['window_end'] = pdf['window'].apply(lambda w: w[1] if w else None)
+        pdf = pdf.drop(columns=['window'])
+        
+        # Load previously accumulated metrics to maintain historic trend
+        import os
+        if os.path.exists(self.csv_path):
+            try:
+                import pandas as pd
+                old_pdf = pd.read_csv(self.csv_path)
+                # Ensure timestamp columns are parsed identically
+                pdf['window_start'] = pd.to_datetime(pdf['window_start']).dt.tz_localize(None)
+                old_pdf['window_start'] = pd.to_datetime(old_pdf['window_start']).dt.tz_localize(None)
+                
+                # Combine, drop duplicates keeping the most recent calculation, and sort
+                combined_pdf = pd.concat([old_pdf, pdf]).drop_duplicates(subset=['window_start'], keep='last')
+                pdf = combined_pdf.sort_values(by='window_start').reset_index(drop=True)
+            except Exception as e:
+                print(f"[BATCH PROCESS] Failed to merge with existing CSV history: {e}")
+                
+        # Calculate Z-Score of negative sentiment over the last 10 windows
+        if len(pdf) >= 2:
+            rolling_mean = pdf['avg_neg'].rolling(window=10, min_periods=1).mean()
+            rolling_std = pdf['avg_neg'].rolling(window=10, min_periods=1).std().fillna(1e-5)
+            pdf['z_score'] = (pdf['avg_neg'] - rolling_mean) / rolling_std
+        else:
+            pdf['z_score'] = 0.0
+            
+        # Keep only the last 100 windows to conserve dashboard performance and stay within API constraints
+        pdf = pdf.tail(100)
+        
+        # Save back to DBFS local cache
+        pdf.to_csv(self.csv_path, index=False)
+        print(f"[BATCH PROCESS] Saved metrics locally. Row count: {len(pdf)}")
+        
+        # Push updated CSV content to GitHub
+        csv_string = pdf.to_csv(index=False)
+        self.push_to_github(csv_string)
 
 # COMMAND ----------
 
 # Start Streaming Query
 checkpoint_dir = "file:/tmp/tweets/checkpoints"
 
+# Fetch widgets credentials ONCE on the driver node
+git_token = dbutils.widgets.get("github_token")
+git_repo = dbutils.widgets.get("github_repo")
+git_branch = dbutils.widgets.get("github_branch")
+git_file = dbutils.widgets.get("github_file_path")
+
+# Instantiate serializable batch processor
+processor = BatchProcessor(
+    csv_path=dbfs_csv_path,
+    token=git_token,
+    repo=git_repo,
+    branch=git_branch,
+    file_path=git_file
+)
+
 query = (aggregated_stream.writeStream
-         .foreachBatch(process_batch)
+         .foreachBatch(processor)
          .outputMode("update")
          .option("checkpointLocation", checkpoint_dir)
          .start())
