@@ -161,6 +161,22 @@ def stop_emulator():
 # COMMAND ----------
 
 
+# Define workspace paths
+incoming_dir = "/Workspace/Shared/Real-Time-Twitter-Financial-Sentiment-Seismograph/tmp/tweets/incoming"
+checkpoint_dir = "/Workspace/tmp/tweets/checkpoints"
+local_csv_path = "/tmp/tweets/aggregated_metrics.csv"
+
+# Pre-run cleanup to ensure fresh workspace state
+print("[INIT] Preparing workspace environment for demo run...")
+try:
+    dbutils.fs.rm(incoming_dir, True)
+    dbutils.fs.rm(checkpoint_dir, True)
+    if os.path.exists(local_csv_path):
+        os.remove(local_csv_path)
+    print("[INIT] Pre-run cleanup completed successfully.")
+except Exception as e:
+    print(f"[INIT] Warning during workspace initialization: {e}")
+
 # Start the emulator (Run this to start streaming mock files)
 csv_src = dbutils.widgets.get("csv_source_path")
 start_emulator(csv_path=csv_src, chunk_size=50, interval=10)
@@ -416,7 +432,9 @@ import shutil
 
 # SOLUTION: Use an absolute scratchpad path without the 'file:' or 'dbfs:' prefixes.
 # This satisfies DatabricksCheckpointFileManager while granting streaming write access.
+incoming_dir = "/Workspace/Shared/Real-Time-Twitter-Financial-Sentiment-Seismograph/tmp/tweets/incoming"
 checkpoint_dir = "/Workspace/tmp/tweets/checkpoints"
+local_csv_path = "/tmp/tweets/aggregated_metrics.csv"
 
 print("=== INITIATING STREAM ENGINE PRE-LAUNCH CONTROL ===")
 
@@ -433,9 +451,9 @@ print(f" -> Target metrics output file:    {git_file}")
 if os.path.exists(checkpoint_dir):
     try:
         shutil.rmtree(checkpoint_dir)
-        print(" ✅ [CLEANUP] Workspace scratchpad checkpoint cache wiped cleanly.")
+        print("[CLEANUP] Workspace scratchpad checkpoint cache wiped cleanly.")
     except Exception as cleanup_err:
-        print(f" ⚠️ [CLEANUP] Notice: Skipping manual folder wipe: {cleanup_err}")
+        print(f"[CLEANUP] Notice: Skipping manual folder wipe: {cleanup_err}")
 
 # Step 3: Instantiate the serializable micro-batch engine
 processor = BatchProcessor(
@@ -446,21 +464,65 @@ processor = BatchProcessor(
     file_path=git_file
 )
 
-# Step 4: Assemble and spark the Structured Streaming engine
-print("\n🚀 Igniting Spark Structured Streaming query engine...")
+# Step 4: Assemble and spark the Structured Streaming engine (Continuous Mode)
+print("[STREAM] Starting Spark Structured Streaming query...")
 try:
     query = (aggregated_stream.writeStream
              .foreachBatch(processor)
              .outputMode("update")
              .option("checkpointLocation", checkpoint_dir)
-             .trigger(availableNow=True)
              .start())
     
-    print(" ✅ [STREAM STARTED] Query is actively transforming live data batches.")
+    print("[STREAM] Query is active and processing live data batches.")
 except Exception as stream_err:
-    print(f" ❌ [CRITICAL CORRUPTION] Streaming engine execution halted. Error details: {stream_err}")
+    print(f"[ERROR] Streaming engine execution halted: {stream_err}")
+    raise stream_err
 
-print("\n=== SYSTEM ONLINE ===")
+# Step 5: Run-time loop for 30 minutes (1800 seconds)
+import time
+
+demo_duration = 1800
+check_interval = 60
+
+print("[DEMO] Starting 30-minute continuous execution monitoring...")
+start_time = time.time()
+elapsed = 0
+
+while elapsed < demo_duration:
+    time.sleep(check_interval)
+    elapsed = int(time.time() - start_time)
+    minutes_left = (demo_duration - elapsed) // 60
+    print(f"[DEMO] Elapsed: {elapsed // 60} min | Remaining: {minutes_left} min")
+    
+    if not query.isActive:
+        print("[ERROR] Spark streaming query terminated unexpectedly.")
+        break
+
+# Step 6: Graceful teardown
+print("[DEMO] Demo duration reached or stream stopped. Initiating shutdown...")
+
+if 'query' in globals() and query.isActive:
+    print("[DEMO] Stopping Spark streaming query...")
+    query.stop()
+    query.awaitTermination(timeout=30)
+    print("[DEMO] Spark streaming query stopped successfully.")
+
+print("[DEMO] Stopping Twitter stream emulator...")
+stop_emulator()
+time.sleep(5)
+
+# Step 7: Final clean-up of temporary files
+print("[CLEANUP] Removing generated temporary files and directory caches...")
+try:
+    dbutils.fs.rm(incoming_dir, True)
+    dbutils.fs.rm(checkpoint_dir, True)
+    if os.path.exists(local_csv_path):
+        os.remove(local_csv_path)
+    print("[CLEANUP] Final workspace cleanup completed successfully.")
+except Exception as cleanup_err:
+    print(f"[WARNING] Error during final workspace cleanup: {cleanup_err}")
+
+print("[SYSTEM] Demo run completed and workspace restored.")
 
 # COMMAND ----------
 
