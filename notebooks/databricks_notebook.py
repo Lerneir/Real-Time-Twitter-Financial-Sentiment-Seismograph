@@ -52,10 +52,19 @@ except NameError:
 
 # Define Widgets for Github & Kaggle Credentials & Paths
 dbutils.widgets.text("github_token", "", "GitHub Personal Access Token")
-dbutils.widgets.text("github_repo", "username/repo", "GitHub Repository (owner/repo)")
+dbutils.widgets.text("github_repo", "Lerneir/Real-Time-Twitter-Financial-Sentiment-Seismograph", "GitHub Repository (owner/repo)")
 dbutils.widgets.text("github_branch", "main", "GitHub Branch")
 dbutils.widgets.text("github_file_path", "aggregated_metrics.csv", "GitHub File Path")
-dbutils.widgets.text("csv_source_path", "../data/train_data.csv", "Source CSV Path (DBFS or relative repo path)")
+dbutils.widgets.text("csv_source_path", "/Workspace/Shared/Real-Time-Twitter-Financial-Sentiment-Seismograph/data/train_data.csv", "Source CSV Path (DBFS or relative repo path)")
+
+# Resolve workspace paths dynamically relative to this notebook
+import os
+notebook_dir = os.path.abspath(os.getcwd())
+project_root = os.path.abspath(os.path.join(notebook_dir, ".."))
+
+incoming_dir = os.path.join(project_root, "tmp/tweets/incoming")
+checkpoint_dir = os.path.join(project_root, "tmp/tweets/checkpoints")
+local_csv_path = os.path.join(project_root, "tmp/tweets/aggregated_metrics.csv")
 
 # COMMAND ----------
 
@@ -138,9 +147,12 @@ def run_chunker(csv_path, output_dir, chunk_size, interval):
     except Exception as e:
         print(f"[EMULATOR] Error in stream emulator thread: {e}")
 
-def start_emulator(csv_path, output_dir="/Workspace/Shared/Real-Time-Twitter-Financial-Sentiment-Seismograph/tmp/tweets/incoming", chunk_size=50, interval=10):
+def start_emulator(csv_path, output_dir=None, chunk_size=50, interval=10):
     global stop_event
     stop_event.clear()
+    
+    # Resolve output directory to global incoming_dir if not specified
+    output_dir = output_dir or incoming_dir
     
     # Check if thread is already running
     for t in threading.enumerate():
@@ -161,11 +173,6 @@ def stop_emulator():
 # COMMAND ----------
 
 
-# Define workspace paths
-incoming_dir = "/Workspace/Shared/Real-Time-Twitter-Financial-Sentiment-Seismograph/tmp/tweets/incoming"
-checkpoint_dir = "/Workspace/tmp/tweets/checkpoints"
-local_csv_path = "/tmp/tweets/aggregated_metrics.csv"
-
 # Pre-run cleanup to ensure fresh workspace state
 print("[INIT] Preparing workspace environment for demo run...")
 try:
@@ -173,7 +180,9 @@ try:
     dbutils.fs.rm(checkpoint_dir, True)
     if os.path.exists(local_csv_path):
         os.remove(local_csv_path)
-    print("[INIT] Pre-run cleanup completed successfully.")
+    # Guarantee incoming directory exists before Spark readStream starts
+    os.makedirs(incoming_dir, exist_ok=True)
+    print("[INIT] Pre-run cleanup completed and directories initialized.")
 except Exception as e:
     print(f"[INIT] Warning during workspace initialization: {e}")
 
@@ -203,7 +212,7 @@ raw_stream = (spark.readStream
               .format("json")
               .schema(schema)
               .option("maxFilesPerTrigger", 1)
-              .load("/Workspace/Shared/Real-Time-Twitter-Financial-Sentiment-Seismograph/tmp/tweets/incoming/"))
+              .load(incoming_dir))
 
 # Clean tweets: remove URLs, handles, punctuation, keep currency symbols ($)
 cleaned_stream = (raw_stream
@@ -303,7 +312,7 @@ aggregated_stream = (weighted_stream
 import os
 
 # Create DBFS local storage path for metrics
-dbfs_csv_path = "/tmp/tweets/aggregated_metrics.csv"
+dbfs_csv_path = local_csv_path
 os.makedirs(os.path.dirname(dbfs_csv_path), exist_ok=True)
 
 class BatchProcessor:
@@ -430,12 +439,6 @@ dbutils.fs.rm("/Workspace/Shared/Real-Time-Twitter-Financial-Sentiment-Seismogra
 import os
 import shutil
 
-# SOLUTION: Use an absolute scratchpad path without the 'file:' or 'dbfs:' prefixes.
-# This satisfies DatabricksCheckpointFileManager while granting streaming write access.
-incoming_dir = "/Workspace/Shared/Real-Time-Twitter-Financial-Sentiment-Seismograph/tmp/tweets/incoming"
-checkpoint_dir = "/Workspace/tmp/tweets/checkpoints"
-local_csv_path = "/tmp/tweets/aggregated_metrics.csv"
-
 print("=== INITIATING STREAM ENGINE PRE-LAUNCH CONTROL ===")
 
 # Step 1: Extract runtime connection tokens and configurations from active UI widgets
@@ -485,8 +488,8 @@ try:
                  .trigger(availableNow=True)
                  .start())
         
-        # Await completion of this triggered run
-        query.awaitTermination()
+        # Await completion of this triggered run with a timeout to prevent driver blocks
+        query.awaitTermination(timeout=60)
         
         # Update elapsed time
         current_time = time.time()
