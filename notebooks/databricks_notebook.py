@@ -464,39 +464,46 @@ processor = BatchProcessor(
     file_path=git_file
 )
 
-# Step 4: Assemble and spark the Structured Streaming engine (Continuous Mode)
-print("[STREAM] Starting Spark Structured Streaming query...")
-try:
-    query = (aggregated_stream.writeStream
-             .foreachBatch(processor)
-             .outputMode("update")
-             .option("checkpointLocation", checkpoint_dir)
-             .start())
-    
-    print("[STREAM] Query is active and processing live data batches.")
-except Exception as stream_err:
-    print(f"[ERROR] Streaming engine execution halted: {stream_err}")
-    raise stream_err
-
-# Step 5: Run-time loop for 30 minutes (1800 seconds)
+# Step 4: Assemble and run the Structured Streaming query in a triggered loop
 import time
 
-demo_duration = 1800
-check_interval = 60
-
-print("[DEMO] Starting 30-minute continuous execution monitoring...")
+demo_duration = 1800  # 30 minutes
+run_interval = 15     # Interval in seconds between stream triggers
 start_time = time.time()
 elapsed = 0
+last_progress_log = 0
 
-while elapsed < demo_duration:
-    time.sleep(check_interval)
-    elapsed = int(time.time() - start_time)
-    minutes_left = (demo_duration - elapsed) // 60
-    print(f"[DEMO] Elapsed: {elapsed // 60} min | Remaining: {minutes_left} min")
-    
-    if not query.isActive:
-        print("[ERROR] Spark streaming query terminated unexpectedly.")
-        break
+print("[DEMO] Starting 30-minute triggered execution loop...")
+
+try:
+    while elapsed < demo_duration:
+        # Start the query with trigger(availableNow=True) to process all available files
+        query = (aggregated_stream.writeStream
+                 .foreachBatch(processor)
+                 .outputMode("update")
+                 .option("checkpointLocation", checkpoint_dir)
+                 .trigger(availableNow=True)
+                 .start())
+        
+        # Await completion of this triggered run
+        query.awaitTermination()
+        
+        # Update elapsed time
+        current_time = time.time()
+        elapsed = int(current_time - start_time)
+        
+        # Log progress every 60 seconds
+        if elapsed - last_progress_log >= 60:
+            minutes_left = (demo_duration - elapsed) // 60
+            print(f"[DEMO] Elapsed: {elapsed // 60} min | Remaining: {minutes_left} min")
+            last_progress_log = elapsed
+            
+        # Pause before triggering the next run
+        time.sleep(run_interval)
+        
+except Exception as stream_err:
+    print(f"[ERROR] Triggered stream execution failed: {stream_err}")
+    raise stream_err
 
 # Step 6: Graceful teardown
 print("[DEMO] Demo duration reached or stream stopped. Initiating shutdown...")
