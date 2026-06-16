@@ -22,6 +22,7 @@
 
 # MAGIC %md
 # MAGIC ### Cell 1: Install Dependencies & Setup Configurations
+# MAGIC Installs the NLTK library, downloads the VADER lexicon, configures Databricks Widgets for runtime credentials, and sets workspace paths for the ingestion landing zone, Spark checkpoints, and CSV output.
 
 # COMMAND ----------
 
@@ -30,14 +31,6 @@
 # COMMAND ----------
 
 # MAGIC %restart_python
-
-# COMMAND ----------
-
-# MAGIC %restart_python
-
-# COMMAND ----------
-
-dbutils.fs.rm("/Workspace/Shared/Real-Time-Twitter-Financial-Sentiment-Seismograph/tmp/tweets/checkpoints", True)
 
 # COMMAND ----------
 
@@ -90,7 +83,7 @@ print(f"[CONFIG] Local CSV path: {local_csv_path}")
 
 # MAGIC %md
 # MAGIC ### Cell 2: Live Ingestion Stream Emulator (Background Thread)
-# MAGIC Emulates a live streaming tweet API by breaking the Kaggle CSV into batches of 50 tweets and saving them as JSON files in `/tmp/tweets/incoming/` at set intervals.
+# MAGIC Emulates a live streaming tweet API by breaking the Kaggle CSV into batches of 100 tweets and saving them as timestamped JSON files in the ingestion landing zone at 30-second intervals. Runs as a daemon thread with automatic shutdown after 30 minutes.
 
 # COMMAND ----------
 
@@ -105,6 +98,15 @@ import random
 stop_event = threading.Event()
 
 def run_chunker(csv_path, output_dir, chunk_size, interval, max_duration=1800):
+    """Reads a source CSV and writes chunked JSON batches to an output directory at fixed intervals.
+
+    Args:
+        csv_path: Path to the source CSV dataset.
+        output_dir: Directory where JSON batch files are written.
+        chunk_size: Number of tweets per batch.
+        interval: Seconds between batch writes.
+        max_duration: Maximum runtime in seconds before auto-shutdown.
+    """
     print(f"[EMULATOR] Thread started. Reading source: {csv_path}...")
     print(f"[EMULATOR] Will run for maximum {max_duration // 60} minutes")
     emulator_start_time = time.time()
@@ -200,6 +202,7 @@ def run_chunker(csv_path, output_dir, chunk_size, interval, max_duration=1800):
         print(f"[EMULATOR] Error in stream emulator thread: {e}")
 
 def start_emulator(csv_path, output_dir=None, chunk_size=50, interval=10, max_duration=1800):
+    """Launches the stream emulator as a named daemon thread if not already running."""
     global stop_event
     stop_event.clear()
     
@@ -218,6 +221,7 @@ def start_emulator(csv_path, output_dir=None, chunk_size=50, interval=10, max_du
     print("[EMULATOR] Ingestion emulator background thread initiated successfully.")
 
 def stop_emulator():
+    """Signals the emulator background thread to stop gracefully."""
     global stop_event
     stop_event.set()
     print("[EMULATOR] Shutdown signal transmitted. Thread will stop shortly.")
@@ -250,7 +254,6 @@ try:
         print("[INIT] ✓ CSV will be created on first use")
     
     # Clean and create incoming directory (this one is in /Workspace/)
-    import shutil
     if os.path.exists(incoming_dir):
         shutil.rmtree(incoming_dir)
         print("[INIT] ✓ Cleared old incoming files")
@@ -292,6 +295,7 @@ start_emulator(csv_path=csv_src, output_dir=incoming_dir, chunk_size=100, interv
 
 # MAGIC %md
 # MAGIC ### Cell 3: Spark Structured Streaming & NLP Preprocessing
+# MAGIC Defines the JSON schema for incoming tweet batches and initializes a PySpark Structured Streaming read stream. Applies regex-based NLP normalization to remove URLs, user handles, and special characters while preserving dollar-sign (`$`) stock tickers.
 
 # COMMAND ----------
 
@@ -323,9 +327,9 @@ cleaned_stream = (raw_stream
 
 # COMMAND ----------
 
-# MAGIC
 # MAGIC %md
 # MAGIC ### Cell 4: NLTK VADER Sentiment Pandas UDF & Window Aggregation
+# MAGIC Deploys a lazy-initialized VADER classifier inside a Spark Pandas UDF for parallel sentiment scoring. Computes a follower-weighted Weighted Sentiment Index (WSI) and aggregates results over 10-minute sliding windows (1-minute slide interval) with watermarking.
 
 # COMMAND ----------
 
@@ -333,8 +337,12 @@ from pyspark.sql.functions import pandas_udf, window, sum, log, col, avg, count
 import pandas as pd
 import os
 
-# Lazy classifier initializer for workers with write-safe paths
 class VADERClassifier:
+    """Lazy-initialized singleton wrapper for NLTK VADER SentimentIntensityAnalyzer.
+
+    Downloads the VADER lexicon to a writable /tmp path on first access to avoid
+    read-only filesystem errors on Databricks serverless workers.
+    """
     _sia = None
 
     @classmethod
@@ -359,6 +367,7 @@ class VADERClassifier:
 
 @pandas_udf("positive float, negative float, neutral float, compound float")
 def classify_sentiment_vader_udf(texts: pd.Series) -> pd.DataFrame:
+    """Spark Pandas UDF that scores each tweet text with VADER polarity metrics."""
     sia = VADERClassifier.get_sia()
     positives, negatives, neutrals, compounds = [], [], [], []
     for text in texts:
@@ -401,9 +410,9 @@ aggregated_stream = (weighted_stream
 
 # COMMAND ----------
 
-# MAGIC
 # MAGIC %md
 # MAGIC ### Cell 5: Stream Writer & GitHub Push Synchronization
+# MAGIC Implements the `BatchProcessor` class that handles `foreachBatch` micro-batch output. Each batch merges with historical CSV data, computes rolling Z-scores for panic detection, and pushes the updated metrics to GitHub via the Contents API.
 
 # COMMAND ----------
 
@@ -413,6 +422,9 @@ import os
 dbfs_csv_path = local_csv_path
 
 class BatchProcessor:
+    """Serializable foreachBatch processor that accumulates windowed metrics,
+    computes rolling Z-scores, persists results to CSV, and syncs to GitHub.
+    """
     def __init__(self, csv_path, token, repo, branch, file_path):
         self.csv_path = csv_path
         self.token = token
@@ -429,7 +441,7 @@ class BatchProcessor:
             return
             
         url = f"https://api.github.com/repos/{self.repo}/contents/{self.file_path}"
-        print(f"{url}")
+
         headers = {
             "Authorization": f"token {self.token}",
             "Accept": "application/vnd.github.v3+json"
@@ -490,10 +502,8 @@ class BatchProcessor:
         # -----------------------------------
         
         # Load previously accumulated metrics to maintain historic trend
-        import os
         if os.path.exists(self.csv_path):
             try:
-                import pandas as pd
                 old_pdf = pd.read_csv(self.csv_path)
                 # Ensure timestamp columns are parsed identically
                 pdf['window_start'] = pd.to_datetime(pdf['window_start']).dt.tz_localize(None)
@@ -517,7 +527,6 @@ class BatchProcessor:
         pdf = pdf.tail(100)
         
         # Save back to local cache - ensure directory exists
-        import os
         csv_dir = os.path.dirname(self.csv_path)
         if csv_dir:
             os.makedirs(csv_dir, exist_ok=True)
@@ -530,7 +539,7 @@ class BatchProcessor:
 
 # COMMAND ----------
 
-# DBTITLE 1,Cell 18
+
 # =====================================================================
 # FINAL CELL: STREAM ACTIVATION AND MASTER RUN (SERVERLESS COMPATIBLE)
 # =====================================================================
@@ -548,13 +557,11 @@ git_file   = dbutils.widgets.get("github_file_path")
 print(f" -> Synchronizing target repository: {git_repo} [{git_branch}]")
 print(f" -> Target metrics output file:    {git_file}")
 
-# Step 2: Preserve checkpoint to enable incremental processing
-# NOTE: Checkpoint allows availableNow to process only NEW files, not all files every time
+# Step 2: Clear checkpoint directory for a clean processing run
+# This ensures all available data is reprocessed from scratch each execution
 try:
-    # Only clear checkpoint if explicitly needed for a fresh start
-    # Uncomment the next line ONLY if you want to reprocess all data from scratch:
     dbutils.fs.rm(checkpoint_dir, True)
-    print("[CHECKPOINT] Using existing checkpoint for incremental processing (avoids reprocessing old files)")
+    print("[CHECKPOINT] Cleared checkpoint directory for fresh processing run")
 except Exception as checkpoint_info:
     print(f"[CHECKPOINT] Checkpoint will be created on first run: {checkpoint_info}")
 
@@ -633,10 +640,9 @@ print("[SYSTEM] Demo run completed and workspace restored.")
 
 # COMMAND ----------
 
-# MAGIC
 # MAGIC %md
-# MAGIC ### Cell 6: Control and Status Utilities
-# MAGIC Run these cells to check stream activity, view logs, or shut down queries and threads cleanly.
+# MAGIC ### Cell 6: Control & Status Utilities
+# MAGIC Manual control cells for monitoring and managing the streaming pipeline. Run these individually to check stream activity, stop the streaming query, or shut down the emulator thread.
 
 # COMMAND ----------
 
