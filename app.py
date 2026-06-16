@@ -369,7 +369,7 @@ else:
 
     st.write("")
     
-    # --- Third Row: Historical Seismograph Chart ---
+    # --- Third Row: Historical Sentiment Seismograph Chart ---
     st.subheader("🌋 Historical Sentiment Seismograph")
     
     # Dual-axis plotly chart to represent "seismograph" activity
