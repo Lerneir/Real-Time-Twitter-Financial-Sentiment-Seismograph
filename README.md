@@ -75,7 +75,7 @@ This project was built for **DAMO630 – Advanced Data Analytics** at the Master
     -   Note the uploaded DBFS file path (typically `/FileStore/tables/train_data.csv`).
 2.  **Import Notebook:**
     -   Create a new Python Notebook in Databricks.
-    -   Copy the contents of [`databricks_notebook.py`](file:///C:/Users/User/OneDrive/Documentos/Master%20in%20data%20analytics/Advance%20Data%20Analytics/Real-Time-Twitter-Financial-Sentiment-Seismograph/notebooks/databricks_notebook.py) and import or paste it into your workspace.
+    -   Copy the contents of [`databricks_notebook.py`](notebooks/databricks_notebook.py) and import or paste it into your workspace.
 3.  **Configure Workspace Credentials:**
     -   In your Databricks Notebook header, you will see input fields (Widgets) generated automatically:
         -   `github_token`: Paste your GitHub Personal Access Token (PAT) with `repo` read/write scopes.
@@ -92,7 +92,7 @@ This project was built for **DAMO630 – Advanced Data Analytics** at the Master
 
 ------------------------------------------------------------------------
 
-### Part 2: Running the Dashboard Locally
+### Part 2: Running the Dashboard and Tests Locally
 
 1.  **Install Dependencies:** Ensure you have Python 3.9+ installed. Run the following command in your terminal:
 
@@ -100,15 +100,23 @@ This project was built for **DAMO630 – Advanced Data Analytics** at the Master
     pip install -r requirements.txt
     ```
 
-2.  **Launch Streamlit:** Start the web application server:
+2.  **Launch Streamlit:** Start the web application server locally:
 
     ``` bash
-    streamlit run app.py
+    streamlit run src/dashboard/app.py
     ```
 
-    A browser window will open automatically at `http://localhost:8501`.
+    A browser window will open automatically at `http://localhost:8501`. 
+    
+    *Note: The dashboard can also be easily deployed to [Streamlit Community Cloud](https://streamlit.io/cloud) by linking this repository directly.*
 
-3.  **Explore Dashboard Modes:**
+3.  **Run Pipeline Tests:** You can verify the modular sentiment classification, emulation, and NLP components by executing the test suite:
+
+    ``` bash
+    python -m tests.test_pipeline
+    ```
+
+4.  **Explore Dashboard Modes:**
 
     -   **Demo Mode (Self-Generating Stream):** Default out-of-the-box mode. Does not require active Databricks connections. The dashboard simulates active stream feeds and feeds synthetic sentiment walks to verify signals, gauges, and historical plots instantly.
     -   **Databricks Pipeline:** Fetches metrics updated in real-time by your Databricks cluster using your public GitHub RAW CSV URL.
