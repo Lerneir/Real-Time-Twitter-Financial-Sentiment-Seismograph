@@ -57,14 +57,11 @@ dbutils.widgets.text("github_branch", "main", "GitHub Branch")
 dbutils.widgets.text("github_file_path", "aggregated_metrics.csv", "GitHub File Path")
 dbutils.widgets.text("csv_source_path", "/Workspace/Shared/Real-Time-Twitter-Financial-Sentiment-Seismograph/data/train_data.csv", "Source CSV Path (DBFS or relative repo path)")
 
-# Resolve workspace paths dynamically relative to this notebook
+# Define workspace paths
 import os
-notebook_dir = os.path.abspath(os.getcwd())
-project_root = os.path.abspath(os.path.join(notebook_dir, ".."))
-
-incoming_dir = os.path.join(project_root, "tmp/tweets/incoming")
-checkpoint_dir = os.path.join(project_root, "tmp/tweets/checkpoints")
-local_csv_path = os.path.join(project_root, "tmp/tweets/aggregated_metrics.csv")
+incoming_dir = "/Workspace/Shared/Real-Time-Twitter-Financial-Sentiment-Seismograph/tmp/tweets/incoming"
+checkpoint_dir = "dbfs:/tmp/tweets/checkpoints"
+local_csv_path = "/Workspace/Shared/Real-Time-Twitter-Financial-Sentiment-Seismograph/tmp/tweets/aggregated_metrics.csv"
 
 # COMMAND ----------
 
@@ -337,11 +334,8 @@ class BatchProcessor:
             "Accept": "application/vnd.github.v3+json"
         }
         
-        # 1. Fetch current file SHA if it exists
-        params = {"ref": self.branch} if self.branch else {}
-        sha = None
         try:
-            r = requests.get(url, headers=headers, params=params)
+            r = requests.get(url, headers=headers, params=params, timeout=10)
             if r.status_code == 200:
                 sha = r.json().get("sha")
         except Exception as e:
@@ -359,7 +353,7 @@ class BatchProcessor:
             payload["sha"] = sha
             
         try:
-            put_r = requests.put(url, headers=headers, json=payload)
+            put_r = requests.put(url, headers=headers, json=payload, timeout=10)
             if put_r.status_code in [200, 201]:
                 print(f"[GITHUB SYNC] Successfully committed and pushed updated metrics to {self.repo}/{self.file_path}")
             else:
@@ -429,15 +423,11 @@ class BatchProcessor:
 # COMMAND ----------
 
 
-dbutils.fs.rm("/Workspace/Shared/Real-Time-Twitter-Financial-Sentiment-Seismograph/tmp/tweets/checkpoints", True)
+dbutils.fs.rm(checkpoint_dir, True)
 
 # COMMAND ----------
 
-# =====================================================================
-# FINAL CELL: STREAM ACTIVATION AND MASTER RUN (EPHEMERAL WORKSPACE)
-# =====================================================================
 import os
-import shutil
 
 print("=== INITIATING STREAM ENGINE PRE-LAUNCH CONTROL ===")
 
@@ -450,13 +440,18 @@ git_file   = dbutils.widgets.get("github_file_path")
 print(f" -> Synchronizing target repository: {git_repo} [{git_branch}]")
 print(f" -> Target metrics output file:    {git_file}")
 
+# Pre-check credentials at the driver level for immediate user feedback
+if not git_token or git_repo == "username/repo":
+    print("[WARNING] GitHub credentials are not configured. Metrics will not be pushed to GitHub.")
+else:
+    print("[INFO] GitHub credentials found. Metrics will be pushed on each micro-batch.")
+
 # Step 2: Clear pre-existing checkpoint metadata to ensure state consistency
-if os.path.exists(checkpoint_dir):
-    try:
-        shutil.rmtree(checkpoint_dir)
-        print("[CLEANUP] Workspace scratchpad checkpoint cache wiped cleanly.")
-    except Exception as cleanup_err:
-        print(f"[CLEANUP] Notice: Skipping manual folder wipe: {cleanup_err}")
+try:
+    dbutils.fs.rm(checkpoint_dir, True)
+    print("[CLEANUP] Workspace scratchpad checkpoint cache wiped cleanly.")
+except Exception as cleanup_err:
+    print(f"[CLEANUP] Notice: Skipping manual folder wipe: {cleanup_err}")
 
 # Step 3: Instantiate the serializable micro-batch engine
 processor = BatchProcessor(
@@ -491,6 +486,14 @@ try:
         # Await completion of this triggered run with a timeout to prevent driver blocks
         query.awaitTermination(timeout=60)
         
+        # Retrieve and log progress on the driver node to provide visible cell output
+        progress = query.lastProgress
+        if progress and len(progress.get('sources', [])) > 0:
+            num_input_rows = sum(s.get('numInputRows', 0) for s in progress.get('sources', []))
+            print(f"[DEMO] Triggered run completed. Processed {num_input_rows} rows.")
+        else:
+            print("[DEMO] Triggered run completed. No new data to process.")
+            
         # Update elapsed time
         current_time = time.time()
         elapsed = int(current_time - start_time)
