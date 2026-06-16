@@ -33,6 +33,14 @@
 
 # COMMAND ----------
 
+# MAGIC %restart_python
+
+# COMMAND ----------
+
+dbutils.fs.rm("/Workspace/Shared/Real-Time-Twitter-Financial-Sentiment-Seismograph/tmp/tweets/checkpoints", True)
+
+# COMMAND ----------
+
 import nltk
 nltk.download('vader_lexicon', quiet=True)
 
@@ -52,14 +60,31 @@ except NameError:
 
 # Define Widgets for Github & Kaggle Credentials & Paths
 dbutils.widgets.text("github_token", "", "GitHub Personal Access Token")
-dbutils.widgets.text("github_repo", "username/repo", "GitHub Repository (owner/repo)")
+dbutils.widgets.text("github_repo", "Lerneir/Real-Time-Twitter-Financial-Sentiment-Seismograph", "GitHub Repository (owner/repo)")
 dbutils.widgets.text("github_branch", "main", "GitHub Branch")
 dbutils.widgets.text("github_file_path", "aggregated_metrics.csv", "GitHub File Path")
-dbutils.widgets.text("csv_source_path", "../data/train_data.csv", "Source CSV Path (DBFS or relative repo path)")
+dbutils.widgets.text("csv_source_path", "/Workspace/Shared/Real-Time-Twitter-Financial-Sentiment-Seismograph/data/train_data.csv", "Source CSV Path (DBFS or relative repo path)")
 
-# COMMAND ----------
+# Configure Spark to use Eastern Time for all timestamps
+spark.conf.set("spark.sql.session.timeZone", "America/New_York")
+print("[CONFIG] Spark timezone set to: America/New_York (Eastern Time)")
 
-# MAGIC %restart_python
+# Resolve workspace paths
+import os
+
+# Use absolute paths directly - incoming files can be in /Workspace/ (read-only is OK for reading)
+incoming_dir = "/Workspace/Shared/Real-Time-Twitter-Financial-Sentiment-Seismograph/tmp/tweets/incoming"
+
+# CRITICAL: Checkpoint directory MUST be in a writable location for Spark state stores
+# Using Unity Catalog Volumes - writable on serverless compute
+checkpoint_dir = "/Volumes/twitter_streaming/default/checkpoints/tweets"
+
+# Local CSV output path - Unity Catalog Volumes
+local_csv_path = "/Volumes/twitter_streaming/default/checkpoints/aggregated_metrics.csv"
+
+print(f"[CONFIG] Incoming directory: {incoming_dir}")
+print(f"[CONFIG] Checkpoint directory: {checkpoint_dir}")
+print(f"[CONFIG] Local CSV path: {local_csv_path}")
 
 # COMMAND ----------
 
@@ -79,8 +104,10 @@ import random
 # Global stop event to manage background thread
 stop_event = threading.Event()
 
-def run_chunker(csv_path, output_dir, chunk_size, interval):
+def run_chunker(csv_path, output_dir, chunk_size, interval, max_duration=1800):
     print(f"[EMULATOR] Thread started. Reading source: {csv_path}...")
+    print(f"[EMULATOR] Will run for maximum {max_duration // 60} minutes")
+    emulator_start_time = time.time()
     try:
         # Robust path simplification for Python within Databricks Workspace
         real_csv_path = csv_path
@@ -112,35 +139,72 @@ def run_chunker(csv_path, output_dir, chunk_size, interval):
         print(f"[EMULATOR] Data ready: {len(df)} rows. Commencing emulation...")
         
         chunk_idx = 0
+        consecutive_errors = 0
+        max_consecutive_errors = 5
+        
         while not stop_event.is_set():
-            start_row = (chunk_idx * chunk_size) % len(df)
-            end_row = start_row + chunk_size
-            chunk = df.iloc[start_row:end_row]
+            # Check if max duration reached
+            if time.time() - emulator_start_time >= max_duration:
+                print(f"[EMULATOR] Max duration ({max_duration // 60} min) reached. Stopping.")
+                break
             
-            records = []
-            for _, row in chunk.iterrows():
-                records.append({
-                    "text": str(row["text"]),
-                    "label": int(row["label"]) if "label" in row else 2,
-                    "timestamp": int(time.time()),
-                    "followers": random.randint(100, 500000)
-                })
-                
-            batch_filename = f"batch_{chunk_idx}_{int(time.time())}.json"
-            batch_file_path = os.path.join(real_output_dir, batch_filename)
+            # Check if too many consecutive errors
+            if consecutive_errors >= max_consecutive_errors:
+                print(f"[EMULATOR] Too many consecutive errors ({consecutive_errors}). Stopping.")
+                break
             
-            with open(batch_file_path, "w") as f:
-                json.dump(records, f)
+            try:
+                start_row = (chunk_idx * chunk_size) % len(df)
+                end_row = start_row + chunk_size
+                chunk = df.iloc[start_row:end_row]
                 
-            chunk_idx += 1
-            time.sleep(interval)
+                records = []
+                for _, row in chunk.iterrows():
+                    records.append({
+                        "text": str(row["text"]),
+                        "label": int(row["label"]) if "label" in row else 2,
+                        "timestamp": int(time.time()),
+                        "followers": random.randint(100, 500000)
+                    })
+                
+                batch_filename = f"batch_{chunk_idx}_{int(time.time())}.json"
+                batch_file_path = os.path.join(real_output_dir, batch_filename)
+                
+                # Write with retry logic for transient I/O errors
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        with open(batch_file_path, "w") as f:
+                            json.dump(records, f)
+                        break  # Success - exit retry loop
+                    except (OSError, IOError) as write_err:
+                        if attempt < max_retries - 1:
+                            print(f"[EMULATOR] Write error (attempt {attempt + 1}/{max_retries}): {write_err}. Retrying...")
+                            time.sleep(1)  # Brief pause before retry
+                        else:
+                            print(f"[EMULATOR] Write failed after {max_retries} attempts: {write_err}. Skipping batch.")
+                            consecutive_errors += 1
+                            continue
+                    
+                # Success - reset error counter
+                consecutive_errors = 0
+                chunk_idx += 1
+                time.sleep(interval)
+                
+            except Exception as loop_err:
+                consecutive_errors += 1
+                print(f"[EMULATOR] Error in batch processing loop: {loop_err}. Retrying...")
+                time.sleep(2)
             
     except Exception as e:
         print(f"[EMULATOR] Error in stream emulator thread: {e}")
 
-def start_emulator(csv_path, output_dir="/Workspace/Shared/Real-Time-Twitter-Financial-Sentiment-Seismograph/tmp/tweets/incoming", chunk_size=50, interval=10):
+def start_emulator(csv_path, output_dir=None, chunk_size=50, interval=10, max_duration=1800):
     global stop_event
     stop_event.clear()
+    
+    # Resolve output directory to global incoming_dir if not specified
+    output_dir = output_dir or incoming_dir
     
     # Check if thread is already running
     for t in threading.enumerate():
@@ -148,7 +212,7 @@ def start_emulator(csv_path, output_dir="/Workspace/Shared/Real-Time-Twitter-Fin
             print("[EMULATOR] Emulator thread already running.")
             return
             
-    thread = threading.Thread(target=run_chunker, args=(csv_path, output_dir, chunk_size, interval), name="TwitterStreamEmulator")
+    thread = threading.Thread(target=run_chunker, args=(csv_path, output_dir, chunk_size, interval, max_duration), name="TwitterStreamEmulator")
     thread.daemon = True
     thread.start()
     print("[EMULATOR] Ingestion emulator background thread initiated successfully.")
@@ -160,66 +224,69 @@ def stop_emulator():
 
 # COMMAND ----------
 
-# =====================================================================
-# NUEVA CELDA TEMPORAL DE DIAGNÓSTICO: VALIDANDO LA SOLUCIÓN COMPLETA
-# =====================================================================
-import os
-import pandas as pd
-import json
-import time
-import random
 
-# 1. Parámetros directos del Workspace
-test_csv_path = "/Workspace/Shared/Real-Time-Twitter-Financial-Sentiment-Seismograph/data/train_data.csv"
-test_output_dir = "/Workspace/Shared/Real-Time-Twitter-Financial-Sentiment-Seismograph/tmp/tweets/incoming"
-
-print("=== INICIANDO VERIFICACIÓN DE LA SOLUCIÓN ===")
-print(f"Leyendo desde: {test_csv_path}")
-print(f"Escribiendo en: {test_output_dir}")
-print("-" * 50)
+# Pre-run cleanup to ensure fresh workspace state
+print("[INIT] Preparing workspace environment for demo run...")
+print(f"[INIT] Incoming dir: {incoming_dir}")
+print(f"[INIT] Checkpoint dir: {checkpoint_dir}")
+print(f"[INIT] CSV output: {local_csv_path}")
 
 try:
-    # 2. Forzar la creación de la carpeta directamente en el Workspace
-    print("[PASO 1] Intentando crear la carpeta de destino de forma nativa...")
-    os.makedirs(test_output_dir, exist_ok=True)
-    print(" ✅ ¡Éxito! La carpeta se creó o ya existe sin problemas en el Workspace.")
+    # Clean up checkpoint and CSV using dbutils for Unity Catalog Volumes
+    import shutil
     
-    # 3. Leer el archivo CSV original
-    print("\n[PASO 2] Intentando leer el archivo CSV de Twitter con pandas...")
-    if os.path.exists(test_csv_path):
-        df_test = pd.read_csv(test_csv_path)
-        print(f" ✅ ¡Éxito! Archivo cargado. Filas encontradas: {len(df_test)}")
-    else:
-        print("⚠️ El archivo CSV no se encontró en esa ruta exacta. Usando datos simulados...")
-        df_test = pd.DataFrame({"text": ["Sample tweet $TSLA"], "label": [1]})
-
-    # 4. Intentar escribir un archivo JSON real de prueba
-    print("\n[PASO 3] Intentando escribir un archivo JSON de prueba en la carpeta...")
-    sample_records = [{
-        "text": "Testing the brand new path synchronization!",
-        "label": 1,
-        "timestamp": int(time.time()),
-        "followers": 500
-    }]
+    # Clear checkpoint directory (Unity Catalog Volumes)
+    try:
+        dbutils.fs.rm(checkpoint_dir, True)
+        print("[INIT] ✓ Cleared checkpoint directory")
+    except:
+        print("[INIT] ✓ Checkpoint directory will be created on first use")
     
-    sample_filename = f"batch_solution_test_{int(time.time())}.json"
-    sample_file_path = os.path.join(test_output_dir, sample_filename)
+    # Clear local CSV (Unity Catalog Volumes)
+    try:
+        dbutils.fs.rm(local_csv_path, False)
+        print("[INIT] ✓ Cleared local CSV")
+    except:
+        print("[INIT] ✓ CSV will be created on first use")
     
-    with open(sample_file_path, "w") as f_test:
-        json.dump(sample_records, f_test)
-        
-    print(f" ✅ ¡ÉXITO ROTUNDO! El archivo se escribió correctamente en: '{sample_file_path}'")
-
+    # Clean and create incoming directory (this one is in /Workspace/)
+    import shutil
+    if os.path.exists(incoming_dir):
+        shutil.rmtree(incoming_dir)
+        print("[INIT] ✓ Cleared old incoming files")
+    
+    # Create full directory path including all parent directories
+    os.makedirs(incoming_dir, exist_ok=True)
+    
+    # Verify the directory was actually created
+    if not os.path.exists(incoming_dir):
+        raise Exception(f"Failed to create incoming directory: {incoming_dir}")
+    
+    # Verify write permissions by creating a test file
+    test_file = os.path.join(incoming_dir, ".test_write")
+    try:
+        with open(test_file, "w") as f:
+            f.write("test")
+        os.remove(test_file)
+        print(f"[INIT] ✓ Incoming directory initialized with write permissions: {incoming_dir}")
+    except Exception as perm_err:
+        raise Exception(f"No write permissions in incoming directory: {incoming_dir}. Error: {perm_err}")
+    
+    # Unity Catalog Volumes directories are created automatically - no need to create them
+    print("[INIT] ✓ Unity Catalog Volumes paths configured")
+    
+    # Verify incoming directory is ready
+    if os.path.exists(incoming_dir):
+        existing_files = os.listdir(incoming_dir)
+        print(f"[INIT] ✓ Incoming directory has {len(existing_files)} existing files")
+    
 except Exception as e:
-    print(f" ❌ FALLÓ LA SOLUCIÓN. Error capturado: {e}")
-
-print("\n=== FIN DE LA VERIFICACIÓN ===")
-
-# COMMAND ----------
+    print(f"[INIT] ⚠ Warning during workspace initialization: {e}")
 
 # Start the emulator (Run this to start streaming mock files)
 csv_src = dbutils.widgets.get("csv_source_path")
-start_emulator(csv_path=csv_src, chunk_size=50, interval=10)
+print(f"[INIT] Starting emulator with source: {csv_src}")
+start_emulator(csv_path=csv_src, output_dir=incoming_dir, chunk_size=100, interval=30, max_duration=1800)
 
 # COMMAND ----------
 
@@ -243,7 +310,7 @@ raw_stream = (spark.readStream
               .format("json")
               .schema(schema)
               .option("maxFilesPerTrigger", 1)
-              .load("/Workspace/Shared/Real-Time-Twitter-Financial-Sentiment-Seismograph/tmp/tweets/incoming/"))
+              .load(incoming_dir))
 
 # Clean tweets: remove URLs, handles, punctuation, keep currency symbols ($)
 cleaned_stream = (raw_stream
@@ -256,63 +323,7 @@ cleaned_stream = (raw_stream
 
 # COMMAND ----------
 
-# =====================================================================
-# CELDA TEMPORAL DE DIAGNÓSTICO: PRUEBA DE ESQUEMA Y NLP DE SPARK
-# =====================================================================
-from pyspark.sql.functions import col, regexp_replace, lower, from_unixtime
-import os
-
-print("=== AUDITORÍA DE INGESTIÓN Y LIMPIEZA SPARK ===")
-target_path = "/Workspace/Shared/Real-Time-Twitter-Financial-Sentiment-Seismograph/tmp/tweets/incoming/"
-
-# 1. Verificar si hay archivos reales listos para Spark
-print("[PASO 1] Comprobando disponibilidad de archivos en el Workspace...")
-try:
-    files = dbutils.fs.ls(target_path)
-    json_files = [f for f in files if f.name.endswith('.json')]
-    print(f" -> Total de archivos encontrados en la ruta: {len(files)}")
-    print(f" -> Archivos JSON válidos listos para procesar: {len(json_files)}")
-    if len(json_files) == 0:
-        print("⚠️ ALERTA: No hay archivos JSON. Asegúrate de encender el emulador unos segundos antes.")
-except Exception as path_err:
-    print(f" ❌ Error al acceder a la ruta con dbutils: {path_err}")
-
-# 2. Forzar lectura ESTÁTICA de prueba para inspección profunda
-print("\n[PASO 2] Intentando leer los datos de forma estática con el esquema...")
-try:
-    # Usamos spark.read en lugar de readStream para poder usar .show() y recolectar logs
-    test_df = spark.read.format("json").schema(schema).load(target_path)
-    row_count = test_df.count()
-    print(f" ✅ ¡Éxito! Spark logró leer el directorio. Registros encontrados: {row_count}")
-    
-    print("\n -> Estructura de tipos detectada por Spark (Schema):")
-    test_df.printSchema()
-    
-    # 3. Validar el pipeline de limpieza (Regex)
-    print("\n[PASO 3] Ejecutando transformaciones de limpieza de texto (Regex)...")
-    test_cleaned_df = (test_df
-        .withColumn("cleaned_text", regexp_replace(col("text"), r"http\S+|www\S+|https\S+", "")) 
-        .withColumn("cleaned_text", regexp_replace(col("cleaned_text"), r"@\w+", ""))             
-        .withColumn("cleaned_text", regexp_replace(col("cleaned_text"), r"[^a-zA-Z0-9\s\$]", ""))  
-        .withColumn("cleaned_text", lower(col("cleaned_text")))
-        .withColumn("timestamp_datetime", from_unixtime(col("timestamp")).cast("timestamp"))
-    )
-    
-    # Mostrar una muestra de cómo quedaron los tweets limpios
-    print("\n📊 MUESTRA DE DATOS PROCESADOS (Original vs Limpio):")
-    if row_count > 0:
-        test_cleaned_df.select("text", "cleaned_text", "followers", "timestamp_datetime").show(5, truncate=False)
-    else:
-        print(" No hay filas para mostrar en la muestra.")
-        
-except Exception as spark_err:
-    print(f" ❌ EL PIPELINE DE SPARK SE ROMPIÓ. Error exacto:")
-    print(str(spark_err))
-
-print("\n=== FIN DE LA AUDITORÍA DE LA CELDA 3 ===")
-
-# COMMAND ----------
-
+# MAGIC
 # MAGIC %md
 # MAGIC ### Cell 4: NLTK VADER Sentiment Pandas UDF & Window Aggregation
 
@@ -390,76 +401,7 @@ aggregated_stream = (weighted_stream
 
 # COMMAND ----------
 
-# =====================================================================
-# CELDA TEMPORAL DE DIAGNÓSTICO: VALIDACIÓN DE UDF Y VENTANA TEMPORAL
-# =====================================================================
-import pandas as pd
-from pyspark.sql.functions import col, log, window, sum, avg, count
-
-print("=== AUDITORÍA DE NLP VADER Y VENTANAS TEMPORALES ===")
-
-try:
-    # 1. Comprobar que dependemos del DF de prueba estático de la Celda 3
-    # Si la celda de diagnóstico anterior no se ha corrido, creamos un set rápido
-    if 'test_cleaned_df' not in globals():
-        print("⚠️ 'test_cleaned_df' no detectado. Recreando una muestra estática rápida...")
-        from pyspark.sql import Row
-        import time
-        sample_data = [
-            Row(cleaned_text="tesla stock is soaring to the moon $tsla", followers=1000, timestamp=int(time.time())),
-            Row(cleaned_text="huge market selloff panic everywhere", followers=10, timestamp=int(time.time())),
-            Row(cleaned_text="apple reports record breaking earnings $aapl", followers=50000, timestamp=int(time.time()))
-        ]
-        test_cleaned_df = spark.createDataFrame(sample_data).withColumn("timestamp_datetime", from_unixtime(col("timestamp")).cast("timestamp"))
-    
-    # 2. PROBAR LA PANDAS UDF DE MANERA AISLADA
-    print("\n[PASO 1] Evaluando comportamiento de la Pandas UDF en los nodos...")
-    # Forzamos una ejecución local controlada de la UDF sobre nuestro DF estático
-    test_sentiment_df = (test_cleaned_df
-                        .withColumn("sentiment", classify_sentiment_vader_udf(col("cleaned_text")))
-                        .select("*", "sentiment.*")
-                        .drop("sentiment"))
-    
-    print(" ✅ ¡Éxito! La UDF procesó el texto y extrajo las métricas vectoriales.")
-    test_sentiment_df.select("cleaned_text", "positive", "negative", "compound").show(3, truncate=False)
-
-    # 3. VERIFICAR EL CONTEXTO MATEMÁTICO DE PESOS (Followers Weight)
-    print("\n[PASO 2] Evaluando cálculo de ponderación por seguidores...")
-    test_weighted_df = (test_sentiment_df
-        .withColumn("weight", log(col("followers") + 1))
-        .withColumn("weighted_diff", (col("positive") - col("negative")) * col("weight"))
-    )
-    test_weighted_df.select("followers", "weight", "weighted_diff").show(3)
-
-    # 4. SIMULAR LA AGRUPACIÓN POR VENTANAS (Window Aggregation)
-    print("\n[PASO 3] Simulando agregación por ventana de 10 minutos (Sliding Window)...")
-    # Nota: Quitamos la marca de agua (.withWatermark) temporalmente aquí porque solo funciona en Streams,
-    # pero ejecutamos exactamente la misma lógica de agrupación estructural.
-    test_aggregated_df = (test_weighted_df
-        .groupBy(window(col("timestamp_datetime"), "10 minutes", "1 minute"))
-        .agg(
-            sum("weighted_diff").alias("sum_weighted_diff"),
-            sum("weight").alias("sum_weight"),
-            avg("negative").alias("avg_neg"),
-            count("cleaned_text").alias("tweet_count")
-        )
-        .withColumn("wsi", col("sum_weighted_diff") / col("sum_weight"))
-    )
-    
-    print(" ✅ ¡Éxito de Estructura! Agregación calculada correctamente.")
-    print("\n📊 RESULTADO MATEMÁTICO FINAL DEL SEISMOGRAPH (Estructura Estática):")
-    test_aggregated_df.select("window.start", "window.end", "tweet_count", "wsi").show(5, truncate=False)
-
-except Exception as udf_error:
-    print(f" ❌ EL MÓDULO MATEMÁTICO/NLP ENCONTRÓ UN ERROR. Detalles:")
-    print(str(udf_error))
-    import traceback
-    traceback.print_exc()
-
-print("\n=== FIN DE LA AUDITORÍA DE LA CELDA 4 ===")
-
-# COMMAND ----------
-
+# MAGIC
 # MAGIC %md
 # MAGIC ### Cell 5: Stream Writer & GitHub Push Synchronization
 
@@ -467,9 +409,8 @@ print("\n=== FIN DE LA AUDITORÍA DE LA CELDA 4 ===")
 
 import os
 
-# Create DBFS local storage path for metrics
-dbfs_csv_path = "/tmp/tweets/aggregated_metrics.csv"
-os.makedirs(os.path.dirname(dbfs_csv_path), exist_ok=True)
+# Use local_csv_path directly - directory creation happens in BatchProcessor
+dbfs_csv_path = local_csv_path
 
 class BatchProcessor:
     def __init__(self, csv_path, token, repo, branch, file_path):
@@ -488,6 +429,7 @@ class BatchProcessor:
             return
             
         url = f"https://api.github.com/repos/{self.repo}/contents/{self.file_path}"
+        print(f"{url}")
         headers = {
             "Authorization": f"token {self.token}",
             "Accept": "application/vnd.github.v3+json"
@@ -574,9 +516,13 @@ class BatchProcessor:
         # Keep only the last 100 windows to conserve dashboard performance and stay within API constraints
         pdf = pdf.tail(100)
         
-        # Save back to DBFS local cache
+        # Save back to local cache - ensure directory exists
+        import os
+        csv_dir = os.path.dirname(self.csv_path)
+        if csv_dir:
+            os.makedirs(csv_dir, exist_ok=True)
         pdf.to_csv(self.csv_path, index=False)
-        print(f"[BATCH PROCESS] Saved metrics locally. Row count: {len(pdf)}")
+        print(f"[BATCH PROCESS] Saved metrics locally to {self.csv_path}. Row count: {len(pdf)}")
         
         # Push updated CSV content to GitHub
         csv_string = pdf.to_csv(index=False)
@@ -584,90 +530,12 @@ class BatchProcessor:
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 18
 # =====================================================================
-# TEMPORARY DIAGNOSTIC CELL: TESTING BATCH WRITER AND GITHUB REST API
-# =====================================================================
-import datetime
-import pandas as pd
-from pyspark.sql import Row
-
-print("=== STARTING BATCH PROCESSOR & GITHUB REST API AUDIT ===")
-
-# 1. Gather live parameter tokens from your active widgets
-test_token = dbutils.widgets.get("github_token")
-test_repo = dbutils.widgets.get("github_repo")
-test_branch = dbutils.widgets.get("github_branch")
-test_file = dbutils.widgets.get("github_file_path")
-
-print(f"Target Repository: {test_repo}")
-print(f"Target Branch:     {test_branch}")
-print(f"Target File Path:   {test_file}")
-print("-" * 50)
-
-# 2. Build Mock Spark Window Aggregation Data matching Cell 4 output
-print("[STEP 1] Generating mock structured window metrics...")
-now = datetime.datetime.now()
-mock_window = Row(start=now - datetime.timedelta(minutes=10), end=now)
-
-# Replicating the schema produced by your streaming aggregated aggregation
-mock_row = Row(
-    window=mock_window,
-    sum_weighted_diff=2.45,
-    sum_weight=12.8,
-    avg_neg=0.15,
-    tweet_count=50,
-    wsi=0.1914
-)
-mock_df = spark.createDataFrame([mock_row])
-
-# 3. Instantiate the BatchProcessor locally
-print("\n[STEP 2] Initializing BatchProcessor instance...")
-test_processor = BatchProcessor(
-    csv_path=dbfs_csv_path,
-    token=test_token,
-    repo=test_repo,
-    branch=test_branch,
-    file_path=test_file
-)
-
-# 4. Trigger a synchronous call to find runtime or path errors
-print("\n[STEP 3] Triggering mock micro-batch execution (Synchronous test)...")
-try:
-    # Explicitly call __call__ directly with batch_id 999
-    test_processor(mock_df, batch_id=999)
-    print(" ✅ [SUCCESS] Local file generation, merging, and Z-score calculations completed flawlessly.")
-    
-    # Verify local file presence
-    if os.path.exists(dbfs_csv_path):
-        print(f" ✅ [SUCCESS] Local caching validated at: '{dbfs_csv_path}'")
-        print("\n📊 Local Cache Snapshot:")
-        print(pd.read_csv(dbfs_csv_path).to_string())
-    else:
-        print("❌ [FAILURE] Code finished but local output file was not found.")
-        
-except Exception as audit_err:
-    print(" ❌ [FAILURE] The batch pipeline broke down during compilation or processing.")
-    print(f"Error Details: {audit_err}")
-    import traceback
-    traceback.print_exc()
-
-print("\n=== BATCH PROCESSOR AUDIT COMPLETE ===")
-
-# COMMAND ----------
-
-dbutils.fs.rm("/Workspace/Shared/Real-Time-Twitter-Financial-Sentiment-Seismograph/tmp/tweets/checkpoints", True)
-
-# COMMAND ----------
-
-# =====================================================================
-# FINAL CELL: STREAM ACTIVATION AND MASTER RUN (EPHEMERAL WORKSPACE)
+# FINAL CELL: STREAM ACTIVATION AND MASTER RUN (SERVERLESS COMPATIBLE)
 # =====================================================================
 import os
-import shutil
-
-# SOLUTION: Use an absolute scratchpad path without the 'file:' or 'dbfs:' prefixes.
-# This satisfies DatabricksCheckpointFileManager while granting streaming write access.
-checkpoint_dir = "/Workspace/tmp/tweets/checkpoints"
+import time
 
 print("=== INITIATING STREAM ENGINE PRE-LAUNCH CONTROL ===")
 
@@ -680,13 +548,15 @@ git_file   = dbutils.widgets.get("github_file_path")
 print(f" -> Synchronizing target repository: {git_repo} [{git_branch}]")
 print(f" -> Target metrics output file:    {git_file}")
 
-# Step 2: Clear pre-existing checkpoint metadata to ensure state consistency
-if os.path.exists(checkpoint_dir):
-    try:
-        shutil.rmtree(checkpoint_dir)
-        print(" ✅ [CLEANUP] Workspace scratchpad checkpoint cache wiped cleanly.")
-    except Exception as cleanup_err:
-        print(f" ⚠️ [CLEANUP] Notice: Skipping manual folder wipe: {cleanup_err}")
+# Step 2: Preserve checkpoint to enable incremental processing
+# NOTE: Checkpoint allows availableNow to process only NEW files, not all files every time
+try:
+    # Only clear checkpoint if explicitly needed for a fresh start
+    # Uncomment the next line ONLY if you want to reprocess all data from scratch:
+    dbutils.fs.rm(checkpoint_dir, True)
+    print("[CHECKPOINT] Using existing checkpoint for incremental processing (avoids reprocessing old files)")
+except Exception as checkpoint_info:
+    print(f"[CHECKPOINT] Checkpoint will be created on first run: {checkpoint_info}")
 
 # Step 3: Instantiate the serializable micro-batch engine
 processor = BatchProcessor(
@@ -697,70 +567,73 @@ processor = BatchProcessor(
     file_path=git_file
 )
 
-# Step 4: Assemble and spark the Structured Streaming engine
-print("\n🚀 Igniting Spark Structured Streaming query engine...")
+# Step 4: Run streaming in loop with availableNow trigger (serverless compatible)
+demo_duration = 1800  # 30 minutes
+start_time = time.time()
+processing_interval = 5  # Process every 5 seconds
+
+print("[DEMO] Starting streaming loop for 30-minute demo...")
+print(f"[DEMO] Stream will process available data every {processing_interval} seconds and push to GitHub automatically.")
+
 try:
-    query = (aggregated_stream.writeStream
-             .foreachBatch(processor)
-             .outputMode("update")
-             .option("checkpointLocation", checkpoint_dir)
-             .trigger(availableNow=True)
-             .start())
+    batch_count = 0
+    last_progress_log = 0
     
-    print(" ✅ [STREAM STARTED] Query is actively transforming live data batches.")
+    while time.time() - start_time < demo_duration:
+        elapsed = int(time.time() - start_time)
+        
+        # Run one streaming micro-batch with availableNow trigger
+        query = (aggregated_stream.writeStream
+                 .foreachBatch(processor)
+                 .outputMode("update")
+                 .option("checkpointLocation", checkpoint_dir)
+                 .trigger(availableNow=True)
+                 .start())
+        
+        # Wait for this batch to complete
+        query.awaitTermination()
+        batch_count += 1
+        
+        # Log progress every 60 seconds
+        if elapsed - last_progress_log >= 60:
+            minutes_elapsed = elapsed // 60
+            minutes_left = (demo_duration - elapsed) // 60
+            print(f"[DEMO] Elapsed: {minutes_elapsed} min | Remaining: {minutes_left} min | Batches: {batch_count}")
+            last_progress_log = elapsed
+        
+        # Sleep until next processing interval
+        time.sleep(processing_interval)
+    
+    print(f"\n[DEMO] Demo duration reached. Total batches processed: {batch_count}")
+        
 except Exception as stream_err:
-    print(f" ❌ [CRITICAL CORRUPTION] Streaming engine execution halted. Error details: {stream_err}")
+    print(f"[ERROR] Streaming query execution failed: {stream_err}")
+    raise stream_err
 
-print("\n=== SYSTEM ONLINE ===")
+# Step 5: Graceful teardown
+print("\n[DEMO] Initiating graceful shutdown...")
+print(f"[DEMO] Total batches processed: {batch_count}")
 
-# COMMAND ----------
+print("[DEMO] Stopping Twitter stream emulator...")
+stop_emulator()
+time.sleep(5)
 
-# =====================================================================
-# CELDA TEMPORAL DE DIAGNÓSTICO: CONTROL DE CALIDAD PRE-LANZAMIENTO
-# =====================================================================
-import os
-
-print("=== AUDITORÍA FINAL DE INFRAESTRUCTURA DE STREAMING ===")
-test_checkpoint_dir = "/Workspace/Shared/Real-Time-Twitter-Financial-Sentiment-Seismograph/tmp/tweets/checkpoints"
-
-# 1. Auditar variables extraídas de los Widgets
-print("[PASO 1] Validando credenciales cargadas desde el Driver...")
-print(f" -> Token GitHub detectado (Longitud): {len(git_token) if git_token else 0} caracteres")
-print(f" -> Repositorio Destino: {git_repo}")
-print(f" -> Rama Activa: {git_branch}")
-
-if not git_token or git_repo == "username/repo":
-    print("⚠️ ALERTA: Las credenciales de GitHub parecen no estar configuradas en los widgets superiores.")
-else:
-    print(" ✅ Credenciales listas para la autenticación de la API.")
-
-# 2. Auditar e instruir sobre el estado de los Checkpoints
-print("\n[PASO 2] Analizando el directorio de Checkpoints...")
-checkpoint_exists = os.path.exists(test_checkpoint_dir)
-print(f" -> ¿Existe un historial de checkpoints previo en el disco?: {checkpoint_exists}")
-
-if checkpoint_exists:
-    print("\n💡 NOTA IMPORTANTE DE DEPURACIÓN:")
-    print("Como corregimos la estructura interna del BatchProcessor, los checkpoints viejos")
-    print("pueden causar conflictos de metadatos. Si el stream se cuelga, ejecuta la siguiente")
-    print("línea en una celda para limpiar el historial y forzar un arranque en limpio:")
-    print(f'   dbutils.fs.rm("{test_checkpoint_dir}", True)')
-else:
-    print(" ✅ Directorio limpio. Spark creará un nuevo estado inicial de metadatos.")
-
-# 3. Validar existencia de datos en la Landing Zone
-print("\n[PASO 3] Verificando combustible en la Landing Zone...")
+# Step 6: Final clean-up of temporary files
+print("[CLEANUP] Removing generated temporary files and directory caches...")
 try:
-    incoming_files = dbutils.fs.ls("/Workspace/Shared/Real-Time-Twitter-Financial-Sentiment-Seismograph/tmp/tweets/incoming")
-    jsons = [f for f in incoming_files if f.name.endswith('.json')]
-    print(f" ✅ ¡Listo! Encontrados {len(jsons)} archivos JSON esperando a ser procesados por el stream.")
-except Exception:
-    print("❌ ALERTA: La carpeta 'incoming' está vacía o inaccesible. Asegúrate de encender el emulador primero.")
+    dbutils.fs.rm(incoming_dir, True)
+    dbutils.fs.rm(checkpoint_dir, True)
+    if os.path.exists(local_csv_path):
+        os.remove(local_csv_path)
+    print("[CLEANUP] Final workspace cleanup completed successfully.")
+except Exception as cleanup_err:
+    print(f"[WARNING] Error during final workspace cleanup: {cleanup_err}")
 
-print("\n=== VERIFICACIÓN FINALIZADA ===")
+print("[SYSTEM] Demo run completed and workspace restored.")
 
 # COMMAND ----------
 
+# MAGIC
 # MAGIC %md
 # MAGIC ### Cell 6: Control and Status Utilities
 # MAGIC Run these cells to check stream activity, view logs, or shut down queries and threads cleanly.
