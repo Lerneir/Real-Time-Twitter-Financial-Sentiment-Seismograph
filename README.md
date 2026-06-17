@@ -20,7 +20,7 @@ graph TD
         C -->|Pandas UDF Sentiment Classifier| D[NLTK VADER Inference]
         D -->|Watermarking & Sliding Window Aggregation| E[Metrics & Follower-Weighted WSI Calculation]
         E -->|foreachBatch Sink 1| F[Push aggregated_metrics.csv to GitHub API]
-        D -->|foreachBatch Sink 2| G[Push important_tweets.csv to GitHub API]
+        E -->|foreachBatch Sink 2| G[Push important_tweets.csv to GitHub API]
     end
 
     subgraph "GitHub Repository"
@@ -56,7 +56,7 @@ The backend runs on Databricks inside a serverless Spark environment.
 
 #### 1. Import the Project Workspace
 
-Rather than copying and pasting cells manually, clone the repository directly into your Databricks workspace using Git Folders: 1. Log in to your Databricks Workspace. 2. On the left sidebar, navigate to Workspace. 3. Right-click on your user folder (or choose a shared workspace location), select Create, and click Git Folder (or Repo). 4. Enter the Git Repository URL: `text    https://github.com/Lerneir/Real-Time-Twitter-Financial-Sentiment-Seismograph.git` 5. Select the target branch: `text    code-refactor` 6. Click Create. Databricks will clone the workspace, including the notebook located at `notebooks/databricks_notebook.py`.
+Rather than copying and pasting cells manually, clone the repository directly into your Databricks workspace using Git Folders or cloning the repository: 1. Log in to your Databricks Workspace. 2. On the left sidebar, navigate to Workspace. 3. Right-click on your user folder (or choose a shared workspace location), select Create, and click Git Folder (or Repo). 4. Enter the Git Repository URL: `text    https://github.com/Lerneir/Real-Time-Twitter-Financial-Sentiment-Seismograph.git` 5. Select the target branch: `text    code-refactor` 6. Click Create. Databricks will clone the workspace, including the notebook located at `notebooks/databricks_notebook.py`.
 
 #### 2. Automatic Unity Catalog Infrastructure Setup
 
