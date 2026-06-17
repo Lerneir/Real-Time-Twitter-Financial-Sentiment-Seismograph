@@ -108,7 +108,8 @@ st.sidebar.header("🕹️ Control & Data Panel")
 
 data_source = st.sidebar.selectbox(
     "Choose Data Pipeline Mode",
-    ["Demo Mode (Self-Generating Stream)", "Databricks Pipeline (GitHub CSV)", "Local File Upload"]
+    ["Demo Mode (Self-Generating Stream)", "Databricks Pipeline (GitHub CSV)", "Local File Upload"],
+    index=1
 )
 
 # Configuration for GitHub connection
@@ -117,7 +118,7 @@ uploaded_file = None
 
 if data_source == "Databricks Pipeline (GitHub CSV)":
     st.sidebar.markdown("### GitHub Sync Configuration")
-    repo = st.sidebar.text_input("GitHub Repo (owner/repo)", "username/repo")
+    repo = st.sidebar.text_input("GitHub Repo (owner/repo)", "Lerneir/Real-Time-Twitter-Financial-Sentiment-Seismograph")
     file_path = st.sidebar.text_input("CSV File Name", "aggregated_metrics.csv")
     branch = st.sidebar.text_input("Branch", "main")
     
@@ -130,6 +131,15 @@ elif data_source == "Local File Upload":
 # Auto-refresh toggles
 auto_refresh = st.sidebar.toggle("Auto-Refresh Dashboard", value=True)
 refresh_interval = st.sidebar.slider("Refresh Interval (seconds)", min_value=2, max_value=30, value=5)
+
+z_threshold = st.sidebar.number_input(
+    "Negativity Z-Score Panic Threshold (σ)",
+    min_value=0.0,
+    max_value=10.0,
+    value=2.5,
+    step=0.1,
+    help="Manually enter or adjust the standard deviation threshold for triggering sell/panic signals."
+)
 
 # Clear demo data button
 if st.sidebar.button("Reset Session / Demo Data"):
@@ -221,15 +231,22 @@ def load_data():
         return df, None
         
     elif data_source == "Databricks Pipeline (GitHub CSV)":
-        if not github_url or "username/repo" in github_url:
+        if not github_url or not repo or repo.strip() == "" or repo == "username/repo":
             return None, "Please configure your actual GitHub repository credentials in the sidebar."
         try:
-            # Prevent caching so we fetch live data
-            r = requests.get(github_url, headers={"Cache-Control": "no-cache"})
+            # Prevent caching by appending a timestamp and using cache-busting headers
+            cache_bypassed_url = f"{github_url}?t={int(time.time())}"
+            headers = {
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0"
+            }
+            r = requests.get(cache_bypassed_url, headers=headers)
             if r.status_code != 200:
                 return None, f"Failed to fetch CSV from GitHub: HTTP {r.status_code}. Ensure the file exists and repository is public."
             
-            df = pd.read_csv(github_url)
+            import io
+            df = pd.read_csv(io.StringIO(r.text))
             # Basic validation
             required_cols = ['window_start', 'window_end', 'wsi', 'avg_neg', 'z_score', 'tweet_count']
             if not all(col in df.columns for col in required_cols):
@@ -274,11 +291,11 @@ else:
     # Panic signal: Z-score > 2.5
     # Buy signal: WSI > 0.25 (Positive Market Sentiment)
     # Sell/Panic: Z-score > 2.5 or WSI < -0.25 (Bearish/High Volatility Alert)
-    if latest_z > 2.5:
+    if latest_z > z_threshold:
         signal = "SELL (PANIC DETECTED)"
         signal_class = "signal-sell"
         signal_color = "#ff4b4b"
-        advisor_text = "🚨 MARKET ALERT: Sentiment Z-Score exceeds panic threshold (+2.5). Social media negativity is spiking abnormally. High risk of liquidity/selloff event. Reallocate assets to defensive positions."
+        advisor_text = f"🚨 MARKET ALERT: Sentiment Z-Score exceeds panic threshold (+{z_threshold:.2f}). Social media negativity is spiking abnormally. High risk of liquidity/selloff event. Reallocate assets to defensive positions."
     elif latest_wsi > 0.25:
         signal = "BUY (BULLISH)"
         signal_class = "signal-buy"
@@ -369,7 +386,7 @@ else:
 
     st.write("")
     
-    # --- Third Row: Historical Seismograph Chart ---
+    # --- Third Row: Historical Sentiment Seismograph Chart ---
     st.subheader("🌋 Historical Sentiment Seismograph")
     
     # Dual-axis plotly chart to represent "seismograph" activity
@@ -396,11 +413,11 @@ else:
         line=dict(color="#ff4b4b", width=1.8, dash='dash'),
     ))
     
-    # Add Panic Threshold Line at +2.5
+    # Add Panic Threshold Line
     fig.add_trace(go.Scatter(
         x=df['window_start'],
-        y=[2.5]*len(df),
-        name="Panic Threshold (Z=2.5)",
+        y=[z_threshold]*len(df),
+        name=f"Panic Threshold (Z={z_threshold:.2f})",
         mode='lines',
         line=dict(color="rgba(255, 75, 75, 0.4)", width=1.5, dash='dot'),
         showlegend=True
@@ -454,7 +471,7 @@ else:
     with col_log2:
         st.subheader("🔔 Panic Trigger History")
         
-        panics = df[df['z_score'] > 2.5].copy()
+        panics = df[df['z_score'] > z_threshold].copy()
         if len(panics) == 0:
             st.info("✅ No market panic events recorded in the current window history.")
         else:
