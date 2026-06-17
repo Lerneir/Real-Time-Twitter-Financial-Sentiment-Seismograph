@@ -436,8 +436,13 @@ aggregated_stream = (weighted_stream
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Cell 5: Stream Writer & GitHub Push Synchronization
-# MAGIC Implements the `BatchProcessor` class that handles `foreachBatch` micro-batch output. Each batch merges with historical CSV data, computes rolling Z-scores for panic detection, and pushes the updated metrics to GitHub via the Contents API.
+# MAGIC ### Cell 5A: Tweet Processor Sink (`TweetProcessor`)
+# MAGIC The `TweetProcessor` is a custom serializable sink designed for Spark's `foreachBatch` output. 
+# MAGIC For each micro-batch, it:
+# MAGIC 1. Extracts the top 10 most influential tweets (sorted by follower count).
+# MAGIC 2. Merges them with the existing local history, dropping duplicate tweets (by text).
+# MAGIC 3. Filters to retain tweets from the last 15 minutes, with a fallback to the top 10 overall if there are few recent tweets.
+# MAGIC 4. Saves the results locally in UC Volumes and pushes them to GitHub.
 
 # COMMAND ----------
 
@@ -449,20 +454,23 @@ class TweetProcessor:
     retains the top 10 most important tweets from the last minutes, and syncs to GitHub.
     """
     def __init__(self, csv_path, token, repo, branch, file_path):
-        self.csv_path = csv_path
-        self.token = token
-        self.repo = repo
-        self.branch = branch
-        self.file_path = file_path
+        self.csv_path = csv_path  # Local file cache path (Unity Catalog Volume)
+        self.token = token        # GitHub Personal Access Token
+        self.repo = repo          # Target GitHub repository in "owner/repo" format
+        self.branch = branch      # Git branch to commit and push changes to
+        self.file_path = file_path # Target file path in the repository (e.g., "important_tweets.csv")
 
     def push_to_github(self, csv_content):
+        """Pushes the updated CSV content to GitHub using the Contents API."""
         import requests
         import base64
         
+        # Guard clause: bypass sync if GitHub credentials are not fully configured
         if not self.token or not self.repo or self.repo == "username/repo":
             print("[GITHUB SYNC] GitHub credentials not fully configured. Skipping tweet update.")
             return
             
+        # Target URL for the GitHub Contents API
         url = f"https://api.github.com/repos/{self.repo}/contents/{self.file_path}"
 
         headers = {
@@ -470,7 +478,7 @@ class TweetProcessor:
             "Accept": "application/vnd.github.v3+json"
         }
         
-        # 1. Fetch current file SHA if it exists
+        # 1. Fetch current file SHA if it exists (necessary to overwrite files in GitHub Contents API)
         params = {"ref": self.branch} if self.branch else {}
         sha = None
         try:
@@ -481,7 +489,7 @@ class TweetProcessor:
             print(f"[GITHUB SYNC] Error fetching SHA from GitHub API: {e}")
             return
             
-        # 2. Build upload payload
+        # 2. Build upload payload: content must be base64-encoded
         content_b64 = base64.b64encode(csv_content.encode("utf-8")).decode("utf-8")
         payload = {
             "message": "Update important financial tweets feed",
@@ -489,9 +497,10 @@ class TweetProcessor:
             "branch": self.branch
         }
         if sha:
-            payload["sha"] = sha
+            payload["sha"] = sha # Attach SHA to overwrite the existing file
             
         try:
+            # Send PUT request to create or update the file on GitHub
             put_r = requests.put(url, headers=headers, json=payload)
             if put_r.status_code in [200, 201]:
                 print(f"[GITHUB SYNC] Successfully committed and pushed updated tweets to {self.repo}/{self.file_path}")
@@ -501,32 +510,34 @@ class TweetProcessor:
             print(f"[GITHUB SYNC] Exception occurred during file upload: {e}")
 
     def __call__(self, df, batch_id):
+        """Processes each micro-batch DataFrame from the streaming query."""
         if df.isEmpty():
             return
             
         print(f"\n--- Processing Tweet Micro-Batch: {batch_id} ---")
         
         from pyspark.sql.functions import col
-        # Get the top 10 most followed tweets from this batch
+        # Get the top 10 most followed tweets from this batch to identify high-influence messages
         top_batch = df.select("text", "followers", "timestamp", "compound").orderBy(col("followers").desc()).limit(10)
         pdf = top_batch.toPandas()
         
-        # Load previously accumulated tweets
+        # Load previously accumulated tweets to merge and maintain a sliding window
         import time
         import pandas as pd
         current_time = time.time()
-        time_buffer = 15 * 60  # 15 minutes in seconds
+        time_buffer = 15 * 60  # Retain tweets from the last 15 minutes
         
         if os.path.exists(self.csv_path):
             try:
+                # Read local cached file
                 old_pdf = pd.read_csv(self.csv_path)
-                # Combine and drop duplicates based on text to avoid duplicate tweets
+                # Combine current batch with history and drop duplicates based on text
                 combined_pdf = pd.concat([old_pdf, pdf]).drop_duplicates(subset=['text'], keep='last')
                 
-                # Filter to only keep tweets from the last 15 minutes
+                # Filter to only keep tweets within our time buffer (15 minutes)
                 filtered_pdf = combined_pdf[current_time - combined_pdf['timestamp'] <= time_buffer]
                 
-                # If we have less than 10 tweets in the last 15 minutes, fall back to keeping the top 10 overall
+                # Fallback: if fewer than 10 tweets exist in the last 15 minutes, keep the top 10 overall
                 if len(filtered_pdf) < 10:
                     pdf = combined_pdf.sort_values(by='followers', ascending=False).head(10)
                 else:
@@ -537,33 +548,47 @@ class TweetProcessor:
         else:
             pdf = pdf.sort_values(by='followers', ascending=False).head(10)
             
-        # Save back to local cache
+        # Save the updated list locally to the Unity Catalog Volume cache
         csv_dir = os.path.dirname(self.csv_path)
         if csv_dir:
             os.makedirs(csv_dir, exist_ok=True)
         pdf.to_csv(self.csv_path, index=False)
         print(f"[BATCH PROCESS] Saved important tweets locally to {self.csv_path}. Row count: {len(pdf)}")
         
-        # Push updated CSV content to GitHub
+        # Push updated CSV content to GitHub for the dashboard to pick up
         csv_string = pdf.to_csv(index=False)
         self.push_to_github(csv_string)
 
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Cell 5B: Metrics Aggregation Sink (`BatchProcessor`)
+# MAGIC The `BatchProcessor` handles windowed aggregates for each micro-batch.
+# MAGIC For each batch, it:
+# MAGIC 1. Unpacks the window boundary timestamp correctly.
+# MAGIC 2. Merges new windows with historical data, dropping duplicate windows.
+# MAGIC 3. Computes the rolling Z-score of negative sentiment over the last 10 windows (sliding panic index).
+# MAGIC 4. Truncates history to the last 100 windows and uploads the metrics CSV to GitHub.
+
+# COMMAND ----------
 
 class BatchProcessor:
     """Serializable foreachBatch processor that accumulates windowed metrics,
     computes rolling Z-scores, persists results to CSV, and syncs to GitHub.
     """
     def __init__(self, csv_path, token, repo, branch, file_path):
-        self.csv_path = csv_path
-        self.token = token
-        self.repo = repo
-        self.branch = branch
-        self.file_path = file_path
+        self.csv_path = csv_path  # Local file cache path (Unity Catalog Volume)
+        self.token = token        # GitHub Personal Access Token
+        self.repo = repo          # Target GitHub repository
+        self.branch = branch      # Git branch
+        self.file_path = file_path # Target file path (e.g., "aggregated_metrics.csv")
 
     def push_to_github(self, csv_content):
+        """Pushes the updated aggregated metrics CSV to GitHub Contents API."""
         import requests
         import base64
         
+        # Guard clause: check credentials
         if not self.token or not self.repo or self.repo == "username/repo":
             print("[GITHUB SYNC] GitHub credentials not fully configured. Skipping repository update.")
             return
@@ -586,7 +611,7 @@ class BatchProcessor:
             print(f"[GITHUB SYNC] Error fetching SHA from GitHub API: {e}")
             return
             
-        # 2. Build upload payload
+        # 2. Build upload payload: base64-encoded
         content_b64 = base64.b64encode(csv_content.encode("utf-8")).decode("utf-8")
         payload = {
             "message": "Update aggregated financial sentiment seismograph metrics",
@@ -606,6 +631,7 @@ class BatchProcessor:
             print(f"[GITHUB SYNC] Exception occurred during file upload: {e}")
 
     def __call__(self, df, batch_id):
+        """Processes each micro-batch DataFrame representing windowed aggregates."""
         if df.isEmpty():
             return
             
@@ -613,7 +639,8 @@ class BatchProcessor:
         pdf = df.toPandas()
         
         # --- ROBUST WINDOW UNPACKING FIX ---
-        # Handles both dictionary format {"start": ..., "end": ...} and traditional tuple/list formats
+        # Spark SQL windows are returned as a Struct containing start and end timestamps.
+        # This function unpacks them regardless of the format (dictionary, object, tuple).
         def get_window_bound(w, bound_type):
             if not w:
                 return None
@@ -621,7 +648,7 @@ class BatchProcessor:
                 return w.get(bound_type)
             if hasattr(w, bound_type):
                 return getattr(w, bound_type)
-            # Fallback for old-school tuple/list formats
+            # Fallback for alternative formats
             return w[0] if bound_type == 'start' else w[1]
 
         pdf['window_start'] = pdf['window'].apply(lambda w: get_window_bound(w, 'start'))
@@ -629,21 +656,21 @@ class BatchProcessor:
         pdf = pdf.drop(columns=['window'])
         # -----------------------------------
         
-        # Load previously accumulated metrics to maintain historic trend
+        # Load previously accumulated metrics to maintain the historical trend
         if os.path.exists(self.csv_path):
             try:
                 old_pdf = pd.read_csv(self.csv_path)
-                # Ensure timestamp columns are parsed identically
+                # Ensure timestamps are localized identically for deduplication
                 pdf['window_start'] = pd.to_datetime(pdf['window_start']).dt.tz_localize(None)
                 old_pdf['window_start'] = pd.to_datetime(old_pdf['window_start']).dt.tz_localize(None)
                 
-                # Combine, drop duplicates keeping the most recent calculation, and sort
+                # Combine, drop duplicates keeping the most recent calculation, and sort chronologically
                 combined_pdf = pd.concat([old_pdf, pdf]).drop_duplicates(subset=['window_start'], keep='last')
                 pdf = combined_pdf.sort_values(by='window_start').reset_index(drop=True)
             except Exception as e:
                 print(f"[BATCH PROCESS] Failed to merge with existing CSV history: {e}")
                 
-        # Calculate Z-Score of negative sentiment over the last 10 windows
+        # Calculate the Z-Score of negative sentiment over the last 10 windows (sliding statistics)
         if len(pdf) >= 2:
             rolling_mean = pdf['avg_neg'].rolling(window=10, min_periods=1).mean()
             rolling_std = pdf['avg_neg'].rolling(window=10, min_periods=1).std().fillna(1e-5)
@@ -651,10 +678,10 @@ class BatchProcessor:
         else:
             pdf['z_score'] = 0.0
             
-        # Keep only the last 100 windows to conserve dashboard performance and stay within API constraints
+        # Keep only the last 100 windows to conserve dashboard performance and limit GitHub file size
         pdf = pdf.tail(100)
         
-        # Save back to local cache - ensure directory exists
+        # Save metrics locally to Unity Catalog volume
         csv_dir = os.path.dirname(self.csv_path)
         if csv_dir:
             os.makedirs(csv_dir, exist_ok=True)
@@ -665,14 +692,19 @@ class BatchProcessor:
         csv_string = pdf.to_csv(index=False)
         self.push_to_github(csv_string)
 
+# COMMAND ----------
 
-# =====================================================================
-# FINAL CELL: STREAM ACTIVATION AND MASTER RUN (SERVERLESS COMPATIBLE)
-# =====================================================================
-import os
+# MAGIC %md
+# MAGIC ### Cell 5C: Stream Engine Pre-Launch & Master Execution Loop
+# MAGIC This cell launches the streaming queries in a sequential execution loop designed specifically for serverless compute compatibility.
+# MAGIC 1. It extracts config variables from active UI widgets.
+# MAGIC 2. Clears checkpoint folders to run fresh pipelines.
+# MAGIC 3. Sequentially triggers `availableNow` micro-batches for both streams (`aggregated_stream` and `weighted_stream`).
+# MAGIC 4. Implements graceful teardown and final cleanup of workspace directories on shutdown.
+
+# COMMAND ----------
+
 import time
-
-print("=== INITIATING STREAM ENGINE PRE-LAUNCH CONTROL ===")
 
 # Step 1: Extract runtime connection tokens and configurations from active UI widgets
 git_token       = dbutils.widgets.get("github_token")
@@ -687,9 +719,8 @@ print(f" -> Synchronizing target repository: {git_repo} [{git_branch}]")
 print(f" -> Target metrics output file:    {git_file}")
 print(f" -> Target tweets output file:     {git_tweets_file}")
 
-# Step 2: Clear checkpoint directories for fresh processing run (catalog already created in Cell 5)
-
-# Clear checkpoint directories for a clean processing run
+# Step 2: Clear checkpoint directories for a clean processing run
+# In serverless workflows, removing old checkpoints ensures we re-process from scratch
 try:
     dbutils.fs.rm(checkpoint_dir, True)
     print("[CHECKPOINT] Cleared metrics checkpoint directory for fresh processing run")
@@ -720,9 +751,12 @@ tweet_processor = TweetProcessor(
 )
 
 # Step 4: Run streaming in loop with availableNow trigger (serverless compatible)
-demo_duration = 1800  # 30 minutes
+# In Databricks Serverless, running queries continuously (ProcessingTime trigger) is very expensive.
+# By triggering with 'availableNow=True', Spark processes all currently available files as a batch
+# and shuts down, running in a controlled loop.
+demo_duration = 1800  # Run for 30 minutes total
 start_time = time.time()
-processing_interval = 5  # Process every 5 seconds
+processing_interval = 5  # Refresh interval in seconds
 
 print("[DEMO] Starting streaming loop for 30-minute demo...")
 print(f"[DEMO] Stream will process available data every {processing_interval} seconds and push to GitHub automatically.")
@@ -742,7 +776,7 @@ try:
                  .trigger(availableNow=True)
                  .start())
         
-        # Wait for this batch to complete
+        # Wait for this batch to complete before launching the next one
         query.awaitTermination()
         
         # Run one streaming micro-batch with availableNow trigger for raw tweets
@@ -783,6 +817,7 @@ stop_emulator()
 time.sleep(5)
 
 # Step 6: Final clean-up of temporary files
+# Ensures the workspace remains clean, deleting temporary data and local volume paths
 print("[CLEANUP] Removing generated temporary files and directory caches...")
 try:
     dbutils.fs.rm(incoming_dir, True)
