@@ -41,6 +41,10 @@ env/
 test_incoming/
 test_source_tweets.csv
 *.log
-implementation_plan.md
 docs/Proposal_plan.md
 notebooks\databricks_notebook.ipynb
+tmp/
+docs/diagrama_tecnico.md
+docs/diagrama_tecnico.pdf
+docs/diagrama_tecnico.ipynb
+docs/diagram.html
