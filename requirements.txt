@@ -1,5 +1,7 @@
-streamlit>=1.30.0
-pandas>=2.0.0
-plotly>=5.18.0
-nltk>=3.8.1
-requests>=2.31.0
+streamlit>=1.58.0
+pandas>=3.0.3
+numpy>=2.4.6
+plotly>=6.8.0
+nltk>=3.9.4
+requests>=2.34.2
+gitpython>=3.1.50
