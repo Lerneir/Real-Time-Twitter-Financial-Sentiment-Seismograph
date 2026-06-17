@@ -103,48 +103,59 @@ st.title("⚡ Real-Time Twitter Financial Sentiment Seismograph")
 st.markdown("---")
 
 # --- Sidebar Configuration ---
-st.sidebar.image("https://img.icons8.com/nolan/128/seismometer.png", width=70)
-st.sidebar.header("🕹️ Control & Data Panel")
+st.sidebar.title("⚙️ Control Hub")
 
-data_source = st.sidebar.selectbox(
-    "Choose Data Pipeline Mode",
-    ["Demo Mode (Self-Generating Stream)", "Databricks Pipeline (GitHub CSV)", "Local File Upload"],
-    index=1
-)
-
-# Configuration for GitHub connection
-github_url = ""
-uploaded_file = None
-
-if data_source == "Databricks Pipeline (GitHub CSV)":
-    st.sidebar.markdown("### GitHub Sync Configuration")
-    repo = st.sidebar.text_input("GitHub Repo (owner/repo)", "Lerneir/Real-Time-Twitter-Financial-Sentiment-Seismograph")
-    file_path = st.sidebar.text_input("CSV File Name", "aggregated_metrics.csv")
-    branch = st.sidebar.text_input("Branch", "main")
-    
-    if repo and file_path:
-        github_url = f"https://raw.githubusercontent.com/{repo}/{branch}/{file_path}"
-        st.sidebar.caption(f"Fetching from: `{github_url}`")
-elif data_source == "Local File Upload":
-    uploaded_file = st.sidebar.file_uploader("Upload 'aggregated_metrics.csv'", type=["csv"])
-
-# Auto-refresh toggles
-auto_refresh = st.sidebar.toggle("Auto-Refresh Dashboard", value=True)
-refresh_interval = st.sidebar.slider("Refresh Interval (seconds)", min_value=2, max_value=30, value=5)
-
+# Section 1: Panic Threshold settings (Top priority)
+st.sidebar.subheader("🚨 Sentiment Alerts")
 z_threshold = st.sidebar.number_input(
-    "Negativity Z-Score Panic Threshold (σ)",
+    "Panic Threshold (Z-Score σ)",
     min_value=0.0,
     max_value=10.0,
     value=2.5,
     step=0.1,
-    help="Manually enter or adjust the standard deviation threshold for triggering sell/panic signals."
+    help="Define the standard deviation threshold of negative sentiment to trigger panic/sell signals."
 )
 
-# Clear demo data button
-if st.sidebar.button("Reset Session / Demo Data"):
+# Section 2: Ingestion Pipeline
+st.sidebar.subheader("📡 Ingestion Pipeline")
+data_source = st.sidebar.selectbox(
+    "Active Data Stream Source",
+    ["Mock Stream (Local Emulation)", "Live Databricks Pipeline (via GitHub)", "Offline File Inspection (CSV)"],
+    index=1
+)
+
+# Configuration variables
+github_url = ""
+uploaded_file = None
+github_token = ""
+
+if data_source == "Live Databricks Pipeline (via GitHub)":
+    st.sidebar.markdown("### GitHub Repository Sync")
+    repo = st.sidebar.text_input("Repository Path (owner/repo)", "Lerneir/Real-Time-Twitter-Financial-Sentiment-Seismograph")
+    github_token = st.sidebar.text_input("GitHub Token (optional)", type="password", help="Providing a token enables instant updates (bypassing GitHub's 5-minute CDN cache) and increases API rate limits.")
+    file_path = st.sidebar.text_input("Metrics File Name", "aggregated_metrics.csv")
+    tweets_file_name = st.sidebar.text_input("Tweets File Name", "important_tweets.csv")
+    branch = st.sidebar.text_input("Target Branch", "main")
+    
+    if repo and file_path:
+        github_url = f"https://raw.githubusercontent.com/{repo}/{branch}/{file_path}"
+        st.sidebar.markdown(f'<div style="font-size: 0.8rem; color: #8899A6; margin-bottom: 6px;">📈 Metrics stream: <span style="color: #1DA1F2; word-break: break-all;">{github_url}</span></div>', unsafe_allow_html=True)
+    if repo and tweets_file_name:
+        github_tweets_url = f"https://raw.githubusercontent.com/{repo}/{branch}/{tweets_file_name}"
+        st.sidebar.markdown(f'<div style="font-size: 0.8rem; color: #8899A6;">🐦 Tweets stream: <span style="color: #1DA1F2; word-break: break-all;">{github_tweets_url}</span></div>', unsafe_allow_html=True)
+elif data_source == "Offline File Inspection (CSV)":
+    uploaded_file = st.sidebar.file_uploader("Upload 'aggregated_metrics.csv'", type=["csv"])
+
+# Section 3: Display & Refresh Settings
+st.sidebar.subheader("🎚️ Display & Refresh Settings")
+auto_refresh = st.sidebar.toggle("Enable Live Refresh", value=True)
+refresh_interval = st.sidebar.slider("Refresh Frequency (seconds)", min_value=2, max_value=30, value=5)
+
+# Section 4: Session Maintenance
+if st.sidebar.button("🗑️ Reset Session & Clear Data"):
     st.session_state.clear()
-    st.success("Session state cleared!")
+    st.success("Session data reset successfully!")
+    time.sleep(1)
     st.rerun()
 
 # --- Initialize Demo Data in Session State ---
@@ -182,11 +193,84 @@ if 'demo_df' not in st.session_state:
     
     st.session_state['demo_df'] = df
 
+if 'demo_tweets' not in st.session_state:
+    # Generate initial 10 mock important tweets
+    mock_texts = [
+        "Major institutional buyers spotted loading up on $TSLA. Volume is spiking! 🚀",
+        "Analysts raise target price for $AAPL following incredible customer demand indicators.",
+        "Fed suggests rate cuts might be delayed. Bond yields ticking up. $SPY",
+        "Bitcoin holding strong above key support levels. Bullish structure remains intact. $BTC",
+        "Rumors of merger between key semiconductor players driving tech sector rally. $SOXX",
+        "Oil prices surge amid geopolitical tensions, raising inflation concerns. $USO",
+        "Retail sales report beats expectations, signaling resilient consumer spending.",
+        "Prominent venture capitalist predicts major breakthrough in consumer AI models soon.",
+        "Market volatility index VIX climbs as traders hedge against upcoming CPI release.",
+        "Unbelievable earnings beat from top SaaS player. Guidance exceeds top-end analyst estimates."
+    ]
+    
+    initial_tweets = []
+    base_time = datetime.datetime.now()
+    for i, text in enumerate(mock_texts):
+        followers = int(np.random.randint(5000, 450000))
+        if any(w in text for w in ["spike", "rally", "beat", "strong"]):
+            compound = np.random.uniform(0.4, 0.85)
+        elif any(w in text for w in ["delay", "tension", "volatility"]):
+            compound = np.random.uniform(-0.7, -0.3)
+        else:
+            compound = np.random.uniform(-0.1, 0.3)
+            
+        initial_tweets.append({
+            "timestamp": int((base_time - datetime.timedelta(minutes=i*2)).timestamp()),
+            "text": text,
+            "followers": followers,
+            "compound": compound
+        })
+    st.session_state['demo_tweets'] = pd.DataFrame(initial_tweets)
+
+def fetch_from_github_api(repo, branch, file_path, token=None):
+    headers = {
+        "Accept": "application/vnd.github.v3+json"
+    }
+    if token and token.strip() != "":
+        headers["Authorization"] = f"token {token.strip()}"
+        
+    url = f"https://api.github.com/repos/{repo}/contents/{file_path}"
+    params = {"ref": branch} if branch else {}
+    
+    try:
+        r = requests.get(url, headers=headers, params=params)
+        if r.status_code == 200:
+            import base64
+            content_b64 = r.json().get("content", "")
+            content_b64 = content_b64.replace("\n", "").replace("\r", "")
+            content_bytes = base64.b64decode(content_b64)
+            return content_bytes.decode("utf-8"), None
+        else:
+            return None, f"HTTP {r.status_code}"
+    except Exception as e:
+        return None, str(e)
+
+def fetch_raw_github(github_url):
+    try:
+        cache_bypassed_url = f"{github_url}?t={int(time.time())}"
+        headers = {
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0"
+        }
+        r = requests.get(cache_bypassed_url, headers=headers)
+        if r.status_code == 200:
+            return r.text, None
+        return None, f"HTTP {r.status_code}"
+    except Exception as e:
+        return None, str(e)
+
 # --- Fetch and Clean Metrics Data ---
 def load_data():
-    if data_source == "Demo Mode (Self-Generating Stream)":
+    if data_source == "Mock Stream (Local Emulation)":
         # Check if we need to append a new row (emulating streaming update)
         df = st.session_state['demo_df']
+        tweets_df = st.session_state['demo_tweets']
         
         # Add new point if last point is older than interval
         last_row = df.iloc[-1]
@@ -228,49 +312,175 @@ def load_data():
             df = df.tail(100)
             st.session_state['demo_df'] = df
             
-        return df, None
-        
-    elif data_source == "Databricks Pipeline (GitHub CSV)":
-        if not github_url or not repo or repo.strip() == "" or repo == "username/repo":
-            return None, "Please configure your actual GitHub repository credentials in the sidebar."
-        try:
-            # Prevent caching by appending a timestamp and using cache-busting headers
-            cache_bypassed_url = f"{github_url}?t={int(time.time())}"
-            headers = {
-                "Cache-Control": "no-cache, no-store, must-revalidate",
-                "Pragma": "no-cache",
-                "Expires": "0"
+            # Simulating fresh tweet update
+            new_tweet_texts = [
+                "Whale transaction alert: 50,000 BTC moved off exchanges. Bullish signal? $BTC",
+                "CPI data comes in cooler than expected. Stock futures rallying! $DIA $QQQ",
+                "Tech stock dump: Insiders selling shares at record pace. Be careful.",
+                "Earnings alert: $NVDA beats on EPS and revenue, stock jumps 8% after hours!",
+                "BREAKING: Regulatory investigations launched against major tech giants.",
+                "Retail interest in meme stocks reaches 12-month high. Volatility spiking.",
+                "Bond yields fall to 3-month low as investors seek safe havens.",
+                "Short seller releases critical report on top growth stock. Shares down 15%."
+            ]
+            selected_text = np.random.choice(new_tweet_texts)
+            
+            if is_spike or any(w in selected_text.lower() for w in ["dump", "investigation", "down", "crisis"]):
+                new_compound = np.random.uniform(-0.8, -0.3)
+            elif any(w in selected_text.lower() for w in ["rally", "beat", "jump", "btc"]):
+                new_compound = np.random.uniform(0.3, 0.8)
+            else:
+                new_compound = np.random.uniform(-0.2, 0.2)
+                
+            new_tweet = {
+                "timestamp": int(datetime.datetime.now().timestamp()),
+                "text": selected_text,
+                "followers": int(np.random.randint(10000, 800000)),
+                "compound": new_compound
             }
-            r = requests.get(cache_bypassed_url, headers=headers)
-            if r.status_code != 200:
-                return None, f"Failed to fetch CSV from GitHub: HTTP {r.status_code}. Ensure the file exists and repository is public."
+            
+            tweets_df = pd.concat([pd.DataFrame([new_tweet]), tweets_df]).drop_duplicates(subset=['text']).head(10)
+            st.session_state['demo_tweets'] = tweets_df
+            
+        return df, tweets_df, None
+        
+    elif data_source == "Live Databricks Pipeline (via GitHub)":
+        if not repo or repo.strip() == "" or repo == "username/repo":
+            return None, None, "Please configure your actual GitHub repository credentials in the sidebar."
+        try:
+            # Fetch metrics CSV
+            if github_token and github_token.strip() != "":
+                csv_text, err = fetch_from_github_api(repo, branch, file_path, github_token)
+                if err:
+                    return None, None, f"Failed to fetch metrics via GitHub API: {err}. Check your token and repo path."
+            else:
+                github_url = f"https://raw.githubusercontent.com/{repo}/{branch}/{file_path}"
+                csv_text, err = fetch_raw_github(github_url)
+                if err:
+                    return None, None, f"Failed to fetch metrics via Raw URL: {err}. Consider entering a GitHub Token in the sidebar to bypass caching and prevent rate limits."
             
             import io
-            df = pd.read_csv(io.StringIO(r.text))
+            df = pd.read_csv(io.StringIO(csv_text))
             # Basic validation
             required_cols = ['window_start', 'window_end', 'wsi', 'avg_neg', 'z_score', 'tweet_count']
             if not all(col in df.columns for col in required_cols):
-                return None, f"CSV is missing required metrics columns. Expected: {required_cols}"
+                return None, None, f"CSV is missing required metrics columns. Expected: {required_cols}"
             
             df['window_start'] = pd.to_datetime(df['window_start'])
             df['window_end'] = pd.to_datetime(df['window_end'])
-            return df.sort_values(by='window_start').reset_index(drop=True), None
-        except Exception as e:
-            return None, f"Connection/Parsing Error: {str(e)}"
             
-    elif data_source == "Local File Upload":
+            # Fetch tweets from GitHub
+            tweets_df = None
+            if repo and tweets_file_name:
+                if github_token and github_token.strip() != "":
+                    tweets_csv_text, err_tweets = fetch_from_github_api(repo, branch, tweets_file_name, github_token)
+                    if not err_tweets:
+                        try:
+                            tweets_df = pd.read_csv(io.StringIO(tweets_csv_text))
+                        except Exception as e:
+                            print(f"Error parsing tweets: {e}")
+                else:
+                    tweets_url = f"https://raw.githubusercontent.com/{repo}/{branch}/{tweets_file_name}"
+                    tweets_csv_text, err_tweets = fetch_raw_github(tweets_url)
+                    if not err_tweets:
+                        try:
+                            tweets_df = pd.read_csv(io.StringIO(tweets_csv_text))
+                        except Exception as e:
+                            print(f"Error parsing tweets: {e}")
+            
+            # Validate tweets_df columns if loaded
+            if tweets_df is not None:
+                required_tweets_cols = ['text', 'followers', 'timestamp', 'compound']
+                if not all(col in tweets_df.columns for col in required_tweets_cols):
+                    tweets_df = None
+            
+            return df.sort_values(by='window_start').reset_index(drop=True), tweets_df, None
+        except Exception as e:
+            return None, None, f"Connection/Parsing Error: {str(e)}"
+            
+    elif data_source == "Offline File Inspection (CSV)":
         if uploaded_file is None:
-            return None, "Please drag & drop or select an aggregated_metrics.csv file in the sidebar."
+            return None, None, "Please drag & drop or select an aggregated_metrics.csv file in the sidebar."
         try:
             df = pd.read_csv(uploaded_file)
             df['window_start'] = pd.to_datetime(df['window_start'])
             df['window_end'] = pd.to_datetime(df['window_end'])
-            return df.sort_values(by='window_start').reset_index(drop=True), None
+            
+            # Fallback to demo tweets for local file mode
+            tweets_df = st.session_state.get('demo_tweets')
+            return df.sort_values(by='window_start').reset_index(drop=True), tweets_df, None
         except Exception as e:
-            return None, f"File parsing error: {str(e)}"
+            return None, None, f"File parsing error: {str(e)}"
 
-# Load the dataframe
-df, error_msg = load_data()
+def render_tweet_card(text, followers, timestamp, compound):
+    # Determine sentiment badge
+    if compound >= 0.05:
+        sentiment_html = '<span style="background-color: rgba(0, 255, 127, 0.15); color: #00ff7f; padding: 4px 10px; border-radius: 12px; font-size: 0.75rem; font-weight: 600; margin-left: 10px; border: 1px solid rgba(0, 255, 127, 0.2);">🟢 Bullish</span>'
+    elif compound <= -0.05:
+        sentiment_html = '<span style="background-color: rgba(255, 75, 75, 0.15); color: #ff4b4b; padding: 4px 10px; border-radius: 12px; font-size: 0.75rem; font-weight: 600; margin-left: 10px; border: 1px solid rgba(255, 75, 75, 0.2);">🔴 Bearish</span>'
+    else:
+        sentiment_html = '<span style="background-color: rgba(255, 170, 0, 0.15); color: #ffaa00; padding: 4px 10px; border-radius: 12px; font-size: 0.75rem; font-weight: 600; margin-left: 10px; border: 1px solid rgba(255, 170, 0, 0.2);">🟡 Neutral</span>'
+    
+    # Format follower count
+    if followers >= 1000000:
+        follower_str = f"{followers / 1000000:.1f}M"
+    elif followers >= 1000:
+        follower_str = f"{followers / 1000:.1f}K"
+    else:
+        follower_str = str(followers)
+        
+    # Format timestamp
+    if isinstance(timestamp, str):
+        try:
+            dt = pd.to_datetime(timestamp)
+            time_str = dt.strftime("%I:%M %p")
+        except:
+            time_str = timestamp
+    elif hasattr(timestamp, "strftime"):
+        time_str = timestamp.strftime("%I:%M %p")
+    else:
+        # timestamp is unix epoch
+        try:
+            if timestamp > 1e11:
+                dt = datetime.datetime.fromtimestamp(timestamp / 1000)
+            else:
+                dt = datetime.datetime.fromtimestamp(timestamp)
+            time_str = dt.strftime("%I:%M %p")
+        except:
+            time_str = str(timestamp)
+            
+    # Mock handle and name based on follower count to make it look realistic
+    handles = ["MarketMover", "FinTwitAlpha", "CryptoSentinel", "MacroPulse", "VolumeAlerts", "WSB_Intelligence", "GrowthTrends"]
+    handle_idx = int(followers) % len(handles)
+    username = handles[handle_idx]
+    
+    tweet_html = f"""
+    <div style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 14px; padding: 16px; margin-bottom: 12px; font-family: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;">
+        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;">
+            <div style="display: flex; align-items: center;">
+                <div style="width: 36px; height: 36px; border-radius: 50%; background: linear-gradient(135deg, #1DA1F2 0%, #0d8ecf 100%); display: flex; align-items: center; justify-content: center; color: white; font-weight: 800; font-size: 1rem; margin-right: 12px; box-shadow: 0 4px 10px rgba(29, 161, 242, 0.2);">
+                    {username[0]}
+                </div>
+                <div>
+                    <div style="display: flex; align-items: center; gap: 4px;">
+                        <span style="color: #ffffff; font-weight: 600; font-size: 0.95rem;">{username}</span>
+                        <svg viewBox="0 0 24 24" aria-label="Verified account" style="width: 14px; height: 14px; fill: #1DA1F2;"><g><path d="M22.5 12.5c0-1.58-.875-2.95-2.148-3.6.154-.435.238-.905.238-1.4 0-2.21-1.71-3.99-3.818-3.99-.48 0-.94.1-1.348.27C14.825 2.515 13.512 1.5 12 1.5s-2.825 1.015-3.422 2.28c-.408-.17-.868-.27-1.348-.27-2.108 0-3.818 1.78-3.818 3.99 0 .495.084.965.238 1.4-1.273.65-2.148 2.02-2.148 3.6 0 1.58.875 2.95 2.148 3.6-.154.435-.238.905-.238 1.4 0 2.21 1.71 3.99 3.818 3.99.48 0 .94-.1 1.348-.27.597 1.265 1.91 2.28 3.422 2.28s2.825-1.015 3.422-2.28c.408.17.868.27 1.348.27 2.108 0 3.818-1.78 3.818-3.99 0-.495-.084-.965-.238-1.4 1.273-.65 2.148-2.02 2.148-3.6zm-12.72 3.19l-3.26-3.26 1.41-1.42 1.84 1.83 4.97-4.97 1.42 1.42-6.38 6.4z"></path></g></svg>
+                    </div>
+                    <span style="color: #8899A6; font-size: 0.8rem;">@{username.lower()} · {follower_str} followers</span>
+                </div>
+            </div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <span style="color: #8899A6; font-size: 0.8rem;">{time_str}</span>
+                {sentiment_html}
+            </div>
+        </div>
+        <div style="color: #e1e8ed; font-size: 0.95rem; line-height: 1.5; white-space: pre-wrap; word-break: break-word;">{text}</div>
+    </div>
+    """
+    return tweet_html
+
+# Load the dataframes
+df, tweets_df, error_msg = load_data()
 
 if error_msg:
     st.error(error_msg)
@@ -398,10 +608,10 @@ else:
         y=df['wsi'],
         name="Sentiment Index (WSI)",
         mode='lines+markers',
-        line=dict(color="#00ffff", width=2.5),
+        line=dict(color="#1DA1F2", width=2.5),
         marker=dict(size=4),
         fill='tozeroy',
-        fillcolor='rgba(0, 255, 255, 0.03)'
+        fillcolor='rgba(29, 161, 242, 0.03)'
     ))
     
     # Add Z-Score Line
@@ -444,19 +654,39 @@ else:
     
     st.plotly_chart(fig, use_container_width=True)
 
-    # --- Fourth Row: Historical Log & Alert Table ---
-    col_log1, col_log2 = st.columns([2, 1])
+    # --- Fourth Row: Twitter Radar & Historical Logs ---
+    col_bottom_left, col_bottom_right = st.columns([11, 9])
     
-    with col_log1:
+    with col_bottom_left:
+        st.subheader("🐦 Real-Time Tweet Radar (High Influence)")
+        if tweets_df is None or len(tweets_df) == 0:
+            st.info("ℹ️ No high influence tweets data available. Start the Databricks pipeline to generate and push `important_tweets.csv` to GitHub.")
+        else:
+            # Render scrollable tweet container
+            tweets_html_list = []
+            for _, row in tweets_df.iterrows():
+                tweets_html_list.append(render_tweet_card(
+                    text=row['text'],
+                    followers=int(row['followers']),
+                    timestamp=row['timestamp'],
+                    compound=float(row['compound'])
+                ))
+            
+            feed_html = f"""
+            <div style="max-height: 550px; overflow-y: auto; padding-right: 8px; border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 16px; background: rgba(0, 0, 0, 0.1); padding: 12px;">
+                {"".join(tweets_html_list)}
+            </div>
+            """
+            st.markdown(feed_html, unsafe_allow_html=True)
+            
+    with col_bottom_right:
         st.subheader("📋 Live Activity Logs")
         
-        # Display the table of the last 10 window outputs
+        # Display the table of the last 5 window outputs (reduced from 10 for compact look)
         table_df = df[['window_start', 'window_end', 'wsi', 'avg_neg', 'z_score', 'tweet_count']].copy()
-        # Sort desc for viewer convenience
-        table_df = table_df.sort_values(by='window_start', ascending=False).head(10)
+        table_df = table_df.sort_values(by='window_start', ascending=False).head(5)
         table_df.columns = ["Start Time", "End Time", "WSI (Sentiment)", "Avg Negative", "Z-Score", "Volume (Tweets)"]
         
-        # Format decimal values
         st.dataframe(
             table_df.style.format({
                 "WSI (Sentiment)": "{:+.4f}",
@@ -468,7 +698,7 @@ else:
             hide_index=True
         )
         
-    with col_log2:
+        st.write("")
         st.subheader("🔔 Panic Trigger History")
         
         panics = df[df['z_score'] > z_threshold].copy()
@@ -476,9 +706,16 @@ else:
             st.info("✅ No market panic events recorded in the current window history.")
         else:
             panics = panics.sort_values(by='window_start', ascending=False)
-            for _, row in panics.head(5).iterrows():
+            panic_html_list = []
+            for _, row in panics.head(3).iterrows():
                 time_str = pd.to_datetime(row['window_start']).strftime("%Y-%m-%d %H:%M:%S")
-                st.warning(f"⚠️ **{time_str}** | Z-Score: **{row['z_score']:.2f}** (Negativity: {row['avg_neg']:.4f})")
+                panic_html_list.append(f"""
+                <div style="background: rgba(255, 75, 75, 0.08); border: 1px solid rgba(255, 75, 75, 0.2); border-radius: 8px; padding: 10px; margin-bottom: 8px;">
+                    <span style="color: #ff4b4b; font-weight: bold;">⚠️ {time_str}</span><br>
+                    <span style="font-size: 0.9rem; color: #dddddd;">Z-Score: <b>{row['z_score']:.2f}</b> | Negativity: <b>{row['avg_neg']:.4f}</b></span>
+                </div>
+                """)
+            st.markdown("".join(panic_html_list), unsafe_allow_html=True)
 
 # Auto-refresh loop
 if auto_refresh:

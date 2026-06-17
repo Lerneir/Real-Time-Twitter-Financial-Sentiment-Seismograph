@@ -56,28 +56,50 @@ dbutils.widgets.text("github_token", "", "GitHub Personal Access Token")
 dbutils.widgets.text("github_repo", "Lerneir/Real-Time-Twitter-Financial-Sentiment-Seismograph", "GitHub Repository (owner/repo)")
 dbutils.widgets.text("github_branch", "main", "GitHub Branch")
 dbutils.widgets.text("github_file_path", "aggregated_metrics.csv", "GitHub File Path")
+dbutils.widgets.text("github_tweets_file_path", "important_tweets.csv", "GitHub Tweets File Path")
 dbutils.widgets.text("csv_source_path", "/Workspace/Shared/Real-Time-Twitter-Financial-Sentiment-Seismograph/data/train_data.csv", "Source CSV Path (DBFS or relative repo path)")
 
 # Configure Spark to use Eastern Time for all timestamps
 spark.conf.set("spark.sql.session.timeZone", "America/New_York")
-print("[CONFIG] Spark timezone set to: America/New_York (Eastern Time)")
+print("[CONFIG] Spark timezone set t4o: America/New_York (Eastern Time)")
 
 # Resolve workspace paths
 import os
 
-# Use absolute paths directly - incoming files can be in /Workspace/ (read-only is OK for reading)
-incoming_dir = "/Workspace/Shared/Real-Time-Twitter-Financial-Sentiment-Seismograph/tmp/tweets/incoming"
+# Auto-create Unity Catalog infrastructure if it doesn't exist
+print("\n[SETUP] Ensuring Unity Catalog infrastructure exists...")
+try:
+    # Create dedicated catalog for this project
+    spark.sql("CREATE CATALOG IF NOT EXISTS twitter_streaming")
+    print("[SETUP] ✓ Catalog 'twitter_streaming' ready")
+    
+    spark.sql("CREATE SCHEMA IF NOT EXISTS twitter_streaming.default")
+    print("[SETUP] ✓ Schema 'twitter_streaming.default' ready")
+    
+    # Create volume if it doesn't exist
+    spark.sql("CREATE VOLUME IF NOT EXISTS twitter_streaming.default.checkpoints")
+    print("[SETUP] ✓ Volume 'twitter_streaming.default.checkpoints' ready")
+    
+    print("[SETUP] ✓ All Unity Catalog infrastructure verified and ready")
+except Exception as e:
+    print(f"[SETUP] ⚠ Warning creating UC infrastructure: {e}")
+    print("[SETUP] Note: Volume paths will be created automatically on first write")
 
-# CRITICAL: Checkpoint directory MUST be in a writable location for Spark state stores
-# Using Unity Catalog Volumes - writable on serverless compute
+# CRITICAL: All paths MUST be in Unity Catalog Volumes for serverless compute write access
+# Using dedicated twitter_streaming catalog
+incoming_dir = "/Volumes/twitter_streaming/default/checkpoints/incoming"
 checkpoint_dir = "/Volumes/twitter_streaming/default/checkpoints/tweets"
+checkpoint_tweets_dir = "/Volumes/twitter_streaming/default/checkpoints/tweets_raw"
 
-# Local CSV output path - Unity Catalog Volumes
+# Local CSV output paths - Unity Catalog Volumes
 local_csv_path = "/Volumes/twitter_streaming/default/checkpoints/aggregated_metrics.csv"
+local_tweets_csv_path = "/Volumes/twitter_streaming/default/checkpoints/important_tweets.csv"
 
 print(f"[CONFIG] Incoming directory: {incoming_dir}")
 print(f"[CONFIG] Checkpoint directory: {checkpoint_dir}")
+print(f"[CONFIG] Tweets checkpoint directory: {checkpoint_tweets_dir}")
 print(f"[CONFIG] Local CSV path: {local_csv_path}")
+print(f"[CONFIG] Local tweets CSV path: {local_tweets_csv_path}")
 
 # COMMAND ----------
 
@@ -111,7 +133,7 @@ def run_chunker(csv_path, output_dir, chunk_size, interval, max_duration=1800):
     print(f"[EMULATOR] Will run for maximum {max_duration // 60} minutes")
     emulator_start_time = time.time()
     try:
-        # Robust path simplification for Python within Databricks Workspace
+        # Robust path simplification for Python within Databricks
         real_csv_path = csv_path
         real_output_dir = output_dir
         
@@ -119,8 +141,17 @@ def run_chunker(csv_path, output_dir, chunk_size, interval, max_duration=1800):
         if real_csv_path.startswith("dbfs:/"):
             real_csv_path = real_csv_path.replace("dbfs:/", "/dbfs/")
             
-        # Ensure the destination directory exists in the Workspace without touching /dbfs
-        os.makedirs(real_output_dir, exist_ok=True)
+        # For Unity Catalog Volumes, use dbutils to ensure directory exists
+        if real_output_dir.startswith("/Volumes/"):
+            try:
+                # Unity Catalog Volumes: create directory via dbutils
+                dbutils.fs.mkdirs(real_output_dir)
+                print(f"[EMULATOR] Created Volume directory: {real_output_dir}")
+            except Exception as vol_err:
+                print(f"[EMULATOR] Volume directory creation: {vol_err} (may already exist)")
+        else:
+            # Regular filesystem paths
+            os.makedirs(real_output_dir, exist_ok=True)
         
         # Load the Twitter data
         if not os.path.exists(real_csv_path):
@@ -245,6 +276,13 @@ try:
         print("[INIT] ✓ Cleared checkpoint directory")
     except:
         print("[INIT] ✓ Checkpoint directory will be created on first use")
+        
+    # Clear tweets checkpoint directory (Unity Catalog Volumes)
+    try:
+        dbutils.fs.rm(checkpoint_tweets_dir, True)
+        print("[INIT] ✓ Cleared tweets checkpoint directory")
+    except:
+        pass
     
     # Clear local CSV (Unity Catalog Volumes)
     try:
@@ -252,36 +290,23 @@ try:
         print("[INIT] ✓ Cleared local CSV")
     except:
         print("[INIT] ✓ CSV will be created on first use")
-    
-    # Clean and create incoming directory (this one is in /Workspace/)
-    if os.path.exists(incoming_dir):
-        shutil.rmtree(incoming_dir)
-        print("[INIT] ✓ Cleared old incoming files")
-    
-    # Create full directory path including all parent directories
-    os.makedirs(incoming_dir, exist_ok=True)
-    
-    # Verify the directory was actually created
-    if not os.path.exists(incoming_dir):
-        raise Exception(f"Failed to create incoming directory: {incoming_dir}")
-    
-    # Verify write permissions by creating a test file
-    test_file = os.path.join(incoming_dir, ".test_write")
+        
+    # Clear local tweets CSV (Unity Catalog Volumes)
     try:
-        with open(test_file, "w") as f:
-            f.write("test")
-        os.remove(test_file)
-        print(f"[INIT] ✓ Incoming directory initialized with write permissions: {incoming_dir}")
-    except Exception as perm_err:
-        raise Exception(f"No write permissions in incoming directory: {incoming_dir}. Error: {perm_err}")
+        dbutils.fs.rm(local_tweets_csv_path, False)
+        print("[INIT] ✓ Cleared local tweets CSV")
+    except:
+        pass
     
-    # Unity Catalog Volumes directories are created automatically - no need to create them
+    # Clean incoming directory (now in Unity Catalog Volumes)
+    try:
+        dbutils.fs.rm(incoming_dir, True)
+        print("[INIT] ✓ Cleared old incoming files")
+    except:
+        print("[INIT] ✓ Incoming directory will be created on first use")
+    
+    # Unity Catalog Volumes directories are created automatically when files are written
     print("[INIT] ✓ Unity Catalog Volumes paths configured")
-    
-    # Verify incoming directory is ready
-    if os.path.exists(incoming_dir):
-        existing_files = os.listdir(incoming_dir)
-        print(f"[INIT] ✓ Incoming directory has {len(existing_files)} existing files")
     
 except Exception as e:
     print(f"[INIT] ⚠ Warning during workspace initialization: {e}")
@@ -418,8 +443,111 @@ aggregated_stream = (weighted_stream
 
 import os
 
-# Use local_csv_path directly - directory creation happens in BatchProcessor
-dbfs_csv_path = local_csv_path
+class TweetProcessor:
+    """Serializable foreachBatch processor that extracts the most important tweets
+    from the current micro-batch, merges them with historical important tweets,
+    retains the top 10 most important tweets from the last minutes, and syncs to GitHub.
+    """
+    def __init__(self, csv_path, token, repo, branch, file_path):
+        self.csv_path = csv_path
+        self.token = token
+        self.repo = repo
+        self.branch = branch
+        self.file_path = file_path
+
+    def push_to_github(self, csv_content):
+        import requests
+        import base64
+        
+        if not self.token or not self.repo or self.repo == "username/repo":
+            print("[GITHUB SYNC] GitHub credentials not fully configured. Skipping tweet update.")
+            return
+            
+        url = f"https://api.github.com/repos/{self.repo}/contents/{self.file_path}"
+
+        headers = {
+            "Authorization": f"token {self.token}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+        
+        # 1. Fetch current file SHA if it exists
+        params = {"ref": self.branch} if self.branch else {}
+        sha = None
+        try:
+            r = requests.get(url, headers=headers, params=params)
+            if r.status_code == 200:
+                sha = r.json().get("sha")
+        except Exception as e:
+            print(f"[GITHUB SYNC] Error fetching SHA from GitHub API: {e}")
+            return
+            
+        # 2. Build upload payload
+        content_b64 = base64.b64encode(csv_content.encode("utf-8")).decode("utf-8")
+        payload = {
+            "message": "Update important financial tweets feed",
+            "content": content_b64,
+            "branch": self.branch
+        }
+        if sha:
+            payload["sha"] = sha
+            
+        try:
+            put_r = requests.put(url, headers=headers, json=payload)
+            if put_r.status_code in [200, 201]:
+                print(f"[GITHUB SYNC] Successfully committed and pushed updated tweets to {self.repo}/{self.file_path}")
+            else:
+                print(f"[GITHUB SYNC] GitHub API Error ({put_r.status_code}): {put_r.text}")
+        except Exception as e:
+            print(f"[GITHUB SYNC] Exception occurred during file upload: {e}")
+
+    def __call__(self, df, batch_id):
+        if df.isEmpty():
+            return
+            
+        print(f"\n--- Processing Tweet Micro-Batch: {batch_id} ---")
+        
+        from pyspark.sql.functions import col
+        # Get the top 10 most followed tweets from this batch
+        top_batch = df.select("text", "followers", "timestamp", "compound").orderBy(col("followers").desc()).limit(10)
+        pdf = top_batch.toPandas()
+        
+        # Load previously accumulated tweets
+        import time
+        import pandas as pd
+        current_time = time.time()
+        time_buffer = 15 * 60  # 15 minutes in seconds
+        
+        if os.path.exists(self.csv_path):
+            try:
+                old_pdf = pd.read_csv(self.csv_path)
+                # Combine and drop duplicates based on text to avoid duplicate tweets
+                combined_pdf = pd.concat([old_pdf, pdf]).drop_duplicates(subset=['text'], keep='last')
+                
+                # Filter to only keep tweets from the last 15 minutes
+                filtered_pdf = combined_pdf[current_time - combined_pdf['timestamp'] <= time_buffer]
+                
+                # If we have less than 10 tweets in the last 15 minutes, fall back to keeping the top 10 overall
+                if len(filtered_pdf) < 10:
+                    pdf = combined_pdf.sort_values(by='followers', ascending=False).head(10)
+                else:
+                    pdf = filtered_pdf.sort_values(by='followers', ascending=False).head(10)
+            except Exception as e:
+                print(f"[BATCH PROCESS] Failed to merge with existing tweet history: {e}")
+                pdf = pdf.sort_values(by='followers', ascending=False).head(10)
+        else:
+            pdf = pdf.sort_values(by='followers', ascending=False).head(10)
+            
+        # Save back to local cache
+        csv_dir = os.path.dirname(self.csv_path)
+        if csv_dir:
+            os.makedirs(csv_dir, exist_ok=True)
+        pdf.to_csv(self.csv_path, index=False)
+        print(f"[BATCH PROCESS] Saved important tweets locally to {self.csv_path}. Row count: {len(pdf)}")
+        
+        # Push updated CSV content to GitHub
+        csv_string = pdf.to_csv(index=False)
+        self.push_to_github(csv_string)
+
 
 class BatchProcessor:
     """Serializable foreachBatch processor that accumulates windowed metrics,
@@ -537,8 +665,6 @@ class BatchProcessor:
         csv_string = pdf.to_csv(index=False)
         self.push_to_github(csv_string)
 
-# COMMAND ----------
-
 
 # =====================================================================
 # FINAL CELL: STREAM ACTIVATION AND MASTER RUN (SERVERLESS COMPATIBLE)
@@ -549,29 +675,48 @@ import time
 print("=== INITIATING STREAM ENGINE PRE-LAUNCH CONTROL ===")
 
 # Step 1: Extract runtime connection tokens and configurations from active UI widgets
-git_token  = dbutils.widgets.get("github_token")
-git_repo   = dbutils.widgets.get("github_repo")
-git_branch = dbutils.widgets.get("github_branch")
-git_file   = dbutils.widgets.get("github_file_path")
+git_token       = dbutils.widgets.get("github_token")
+git_repo        = dbutils.widgets.get("github_repo")
+git_branch      = dbutils.widgets.get("github_branch")
+git_file        = dbutils.widgets.get("github_file_path")
+git_tweets_file = dbutils.widgets.get("github_tweets_file_path")
+if not git_tweets_file or git_tweets_file.strip() == "":
+    git_tweets_file = "important_tweets.csv"
 
 print(f" -> Synchronizing target repository: {git_repo} [{git_branch}]")
 print(f" -> Target metrics output file:    {git_file}")
+print(f" -> Target tweets output file:     {git_tweets_file}")
 
-# Step 2: Clear checkpoint directory for a clean processing run
-# This ensures all available data is reprocessed from scratch each execution
+# Step 2: Clear checkpoint directories for fresh processing run (catalog already created in Cell 5)
+
+# Clear checkpoint directories for a clean processing run
 try:
     dbutils.fs.rm(checkpoint_dir, True)
-    print("[CHECKPOINT] Cleared checkpoint directory for fresh processing run")
+    print("[CHECKPOINT] Cleared metrics checkpoint directory for fresh processing run")
 except Exception as checkpoint_info:
-    print(f"[CHECKPOINT] Checkpoint will be created on first run: {checkpoint_info}")
+    print(f"[CHECKPOINT] Metrics checkpoint will be created on first run: {checkpoint_info}")
 
-# Step 3: Instantiate the serializable micro-batch engine
+try:
+    dbutils.fs.rm(checkpoint_tweets_dir, True)
+    print("[CHECKPOINT] Cleared tweets checkpoint directory for fresh processing run")
+except Exception as checkpoint_info:
+    print(f"[CHECKPOINT] Tweets checkpoint will be created on first run: {checkpoint_info}")
+
+# Step 3: Instantiate the serializable processors
 processor = BatchProcessor(
-    csv_path=dbfs_csv_path,
+    csv_path=local_csv_path,
     token=git_token,
     repo=git_repo,
     branch=git_branch,
     file_path=git_file
+)
+
+tweet_processor = TweetProcessor(
+    csv_path=local_tweets_csv_path,
+    token=git_token,
+    repo=git_repo,
+    branch=git_branch,
+    file_path=git_tweets_file
 )
 
 # Step 4: Run streaming in loop with availableNow trigger (serverless compatible)
@@ -589,7 +734,7 @@ try:
     while time.time() - start_time < demo_duration:
         elapsed = int(time.time() - start_time)
         
-        # Run one streaming micro-batch with availableNow trigger
+        # Run one streaming micro-batch with availableNow trigger for metrics
         query = (aggregated_stream.writeStream
                  .foreachBatch(processor)
                  .outputMode("update")
@@ -599,6 +744,18 @@ try:
         
         # Wait for this batch to complete
         query.awaitTermination()
+        
+        # Run one streaming micro-batch with availableNow trigger for raw tweets
+        query_tweets = (weighted_stream.writeStream
+                        .foreachBatch(tweet_processor)
+                        .outputMode("append")
+                        .option("checkpointLocation", checkpoint_tweets_dir)
+                        .trigger(availableNow=True)
+                        .start())
+        
+        # Wait for this batch to complete
+        query_tweets.awaitTermination()
+        
         batch_count += 1
         
         # Log progress every 60 seconds
@@ -630,8 +787,11 @@ print("[CLEANUP] Removing generated temporary files and directory caches...")
 try:
     dbutils.fs.rm(incoming_dir, True)
     dbutils.fs.rm(checkpoint_dir, True)
+    dbutils.fs.rm(checkpoint_tweets_dir, True)
     if os.path.exists(local_csv_path):
         os.remove(local_csv_path)
+    if os.path.exists(local_tweets_csv_path):
+        os.remove(local_tweets_csv_path)
     print("[CLEANUP] Final workspace cleanup completed successfully.")
 except Exception as cleanup_err:
     print(f"[WARNING] Error during final workspace cleanup: {cleanup_err}")
