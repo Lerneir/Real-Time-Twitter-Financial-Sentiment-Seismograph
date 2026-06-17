@@ -21,7 +21,7 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Cell 1: Install Dependencies & Setup Configurations
+# MAGIC ### Install Dependencies & Setup Configurations
 # MAGIC Installs the NLTK library, downloads the VADER lexicon, configures Databricks Widgets for runtime credentials, and sets workspace paths for the ingestion landing zone, Spark checkpoints, and CSV output.
 
 # COMMAND ----------
@@ -104,7 +104,7 @@ print(f"[CONFIG] Local tweets CSV path: {local_tweets_csv_path}")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Cell 2: Live Ingestion Stream Emulator (Background Thread)
+# MAGIC ### Live Ingestion Stream Emulator (Background Thread)
 # MAGIC Emulates a live streaming tweet API by breaking the Kaggle CSV into batches of 100 tweets and saving them as timestamped JSON files in the ingestion landing zone at 30-second intervals. Runs as a daemon thread with automatic shutdown after 30 minutes.
 
 # COMMAND ----------
@@ -204,7 +204,7 @@ def run_chunker(csv_path, output_dir, chunk_size, interval, max_duration=1800):
                 batch_file_path = os.path.join(real_output_dir, batch_filename)
                 
                 # Write with retry logic for transient I/O errors
-                max_retries = 3
+                max_retries = 5
                 for attempt in range(max_retries):
                     try:
                         with open(batch_file_path, "w") as f:
@@ -319,7 +319,7 @@ start_emulator(csv_path=csv_src, output_dir=incoming_dir, chunk_size=100, interv
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Cell 3: Spark Structured Streaming & NLP Preprocessing
+# MAGIC ### Spark Structured Streaming & NLP Preprocessing
 # MAGIC Defines the JSON schema for incoming tweet batches and initializes a PySpark Structured Streaming read stream. Applies regex-based NLP normalization to remove URLs, user handles, and special characters while preserving dollar-sign (`$`) stock tickers.
 
 # COMMAND ----------
@@ -353,7 +353,7 @@ cleaned_stream = (raw_stream
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Cell 4: NLTK VADER Sentiment Pandas UDF & Window Aggregation
+# MAGIC ### NLTK VADER Sentiment Pandas UDF & Window Aggregation
 # MAGIC Deploys a lazy-initialized VADER classifier inside a Spark Pandas UDF for parallel sentiment scoring. Computes a follower-weighted Weighted Sentiment Index (WSI) and aggregates results over 10-minute sliding windows (1-minute slide interval) with watermarking.
 
 # COMMAND ----------
@@ -436,7 +436,7 @@ aggregated_stream = (weighted_stream
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Cell 5A: Tweet Processor Sink (`TweetProcessor`)
+# MAGIC ### Tweet Processor Sink (`TweetProcessor`)
 # MAGIC The `TweetProcessor` is a custom serializable sink designed for Spark's `foreachBatch` output. 
 # MAGIC For each micro-batch, it:
 # MAGIC 1. Extracts the top 10 most influential tweets (sorted by follower count).
@@ -562,7 +562,7 @@ class TweetProcessor:
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Cell 5B: Metrics Aggregation Sink (`BatchProcessor`)
+# MAGIC ### Metrics Aggregation Sink (`BatchProcessor`)
 # MAGIC The `BatchProcessor` handles windowed aggregates for each micro-batch.
 # MAGIC For each batch, it:
 # MAGIC 1. Unpacks the window boundary timestamp correctly.
@@ -695,7 +695,7 @@ class BatchProcessor:
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Cell 5C: Stream Engine Pre-Launch & Master Execution Loop
+# MAGIC ### Stream Engine Pre-Launch & Master Execution Loop
 # MAGIC This cell launches the streaming queries in a sequential execution loop designed specifically for serverless compute compatibility.
 # MAGIC 1. It extracts config variables from active UI widgets.
 # MAGIC 2. Clears checkpoint folders to run fresh pipelines.
@@ -836,7 +836,7 @@ print("[SYSTEM] Demo run completed and workspace restored.")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Cell 6: Control & Status Utilities
+# MAGIC ### Control & Status Utilities
 # MAGIC Manual control cells for monitoring and managing the streaming pipeline. Run these individually to check stream activity, stop the streaming query, or shut down the emulator thread.
 
 # COMMAND ----------
