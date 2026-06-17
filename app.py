@@ -67,6 +67,148 @@ st.markdown("""
         font-size: 2.5rem;
         font-weight: 800;
         margin-top: 5px;
+        transition: font-size 0.3s ease;
+    }
+
+    .signal-description {
+        margin-top: 10px;
+        font-size: 1.1rem;
+        line-height: 1.6;
+        color: #dddddd;
+    }
+
+    .kpi-card {
+        height: auto;
+        min-height: 280px;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        padding: 24px;
+        transition: min-height 0.3s ease;
+    }
+
+    .kpi-title {
+        color: #888888;
+        font-size: 1.1rem;
+        letter-spacing: 1px;
+        font-weight: 600;
+        margin-top: 5px;
+    }
+
+    .kpi-value {
+        font-size: 3.5rem;
+        font-weight: 800;
+        margin: 15px 0;
+        transition: font-size 0.3s ease;
+    }
+
+    .kpi-desc {
+        color: #aaaaaa;
+        font-size: 0.9rem;
+        line-height: 1.4;
+    }
+
+    /* Tweet Card & Feed Containers */
+    .tweet-feed-container {
+        max-height: 550px;
+        overflow-y: auto;
+        padding-right: 8px;
+        border: 1px solid rgba(255, 255, 255, 0.05);
+        border-radius: 16px;
+        background: rgba(0, 0, 0, 0.1);
+        padding: 12px;
+    }
+
+    .tweet-card {
+        background: rgba(255, 255, 255, 0.02);
+        border: 1px solid rgba(255, 255, 255, 0.05);
+        border-radius: 14px;
+        padding: 16px;
+        margin-bottom: 12px;
+        font-family: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
+        transition: border-color 0.3s ease;
+    }
+    .tweet-card:hover {
+        border-color: rgba(29, 161, 242, 0.2);
+    }
+
+    .tweet-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 10px;
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+
+    .tweet-user-info {
+        display: flex;
+        align-items: center;
+    }
+
+    .tweet-avatar {
+        width: 36px;
+        height: 36px;
+        border-radius: 50%;
+        background: linear-gradient(135deg, #1DA1F2 0%, #0d8ecf 100%);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: white;
+        font-weight: 800;
+        font-size: 1rem;
+        margin-right: 12px;
+        box-shadow: 0 4px 10px rgba(29, 161, 242, 0.2);
+        flex-shrink: 0;
+    }
+
+    .tweet-meta {
+        display: flex;
+        flex-direction: column;
+    }
+
+    .tweet-username-row {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+    }
+
+    .tweet-username {
+        color: #ffffff;
+        font-weight: 600;
+        font-size: 0.95rem;
+    }
+
+    .tweet-handle {
+        color: #8899A6;
+        font-size: 0.8rem;
+    }
+
+    .tweet-right-side {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+
+    .tweet-time {
+        color: #8899A6;
+        font-size: 0.8rem;
+    }
+
+    .tweet-body {
+        color: #e1e8ed;
+        font-size: 0.95rem;
+        line-height: 1.5;
+        white-space: pre-wrap;
+        word-break: break-word;
+    }
+
+    .panic-log-card {
+        background: rgba(255, 75, 75, 0.08);
+        border: 1px solid rgba(255, 75, 75, 0.2);
+        border-radius: 8px;
+        padding: 10px;
+        margin-bottom: 8px;
     }
     
     .pulse {
@@ -93,6 +235,52 @@ st.markdown("""
         100% {
             transform: scale(0.95);
             box-shadow: 0 0 0 0 rgba(0, 255, 127, 0);
+        }
+    }
+
+    /* --- Responsive Media Queries --- */
+    @media (max-width: 992px) {
+        .kpi-card {
+            min-height: auto;
+            height: auto;
+            gap: 12px;
+        }
+        .kpi-value {
+            font-size: 2.8rem;
+            margin: 10px 0;
+        }
+        .kpi-title {
+            font-size: 0.95rem;
+        }
+    }
+
+    @media (max-width: 768px) {
+        .metric-card {
+            padding: 18px;
+        }
+        .signal-value {
+            font-size: 2rem;
+        }
+        .signal-description {
+            font-size: 1rem;
+        }
+        .kpi-value {
+            font-size: 2.5rem;
+        }
+    }
+
+    @media (max-width: 600px) {
+        .tweet-header {
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 6px;
+        }
+        .tweet-right-side {
+            width: 100%;
+            justify-content: space-between;
+            margin-top: 4px;
+            border-top: 1px solid rgba(255, 255, 255, 0.05);
+            padding-top: 8px;
         }
     }
 </style>
@@ -455,26 +643,26 @@ def render_tweet_card(text, followers, timestamp, compound):
     username = handles[handle_idx]
     
     tweet_html = f"""
-    <div style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 14px; padding: 16px; margin-bottom: 12px; font-family: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;">
-        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;">
-            <div style="display: flex; align-items: center;">
-                <div style="width: 36px; height: 36px; border-radius: 50%; background: linear-gradient(135deg, #1DA1F2 0%, #0d8ecf 100%); display: flex; align-items: center; justify-content: center; color: white; font-weight: 800; font-size: 1rem; margin-right: 12px; box-shadow: 0 4px 10px rgba(29, 161, 242, 0.2);">
+    <div class="tweet-card">
+        <div class="tweet-header">
+            <div class="tweet-user-info">
+                <div class="tweet-avatar">
                     {username[0]}
                 </div>
-                <div>
-                    <div style="display: flex; align-items: center; gap: 4px;">
-                        <span style="color: #ffffff; font-weight: 600; font-size: 0.95rem;">{username}</span>
+                <div class="tweet-meta">
+                    <div class="tweet-username-row">
+                        <span class="tweet-username">{username}</span>
                         <svg viewBox="0 0 24 24" aria-label="Verified account" style="width: 14px; height: 14px; fill: #1DA1F2;"><g><path d="M22.5 12.5c0-1.58-.875-2.95-2.148-3.6.154-.435.238-.905.238-1.4 0-2.21-1.71-3.99-3.818-3.99-.48 0-.94.1-1.348.27C14.825 2.515 13.512 1.5 12 1.5s-2.825 1.015-3.422 2.28c-.408-.17-.868-.27-1.348-.27-2.108 0-3.818 1.78-3.818 3.99 0 .495.084.965.238 1.4-1.273.65-2.148 2.02-2.148 3.6 0 1.58.875 2.95 2.148 3.6-.154.435-.238.905-.238 1.4 0 2.21 1.71 3.99 3.818 3.99.48 0 .94-.1 1.348-.27.597 1.265 1.91 2.28 3.422 2.28s2.825-1.015 3.422-2.28c.408.17.868.27 1.348.27 2.108 0 3.818-1.78 3.818-3.99 0-.495-.084-.965-.238-1.4 1.273-.65 2.148-2.02 2.148-3.6zm-12.72 3.19l-3.26-3.26 1.41-1.42 1.84 1.83 4.97-4.97 1.42 1.42-6.38 6.4z"></path></g></svg>
                     </div>
-                    <span style="color: #8899A6; font-size: 0.8rem;">@{username.lower()} · {follower_str} followers</span>
+                    <span class="tweet-handle">@{username.lower()} · {follower_str} followers</span>
                 </div>
             </div>
-            <div style="display: flex; align-items: center; gap: 8px;">
-                <span style="color: #8899A6; font-size: 0.8rem;">{time_str}</span>
+            <div class="tweet-right-side">
+                <span class="tweet-time">{time_str}</span>
                 {sentiment_html}
             </div>
         </div>
-        <div style="color: #e1e8ed; font-size: 0.95rem; line-height: 1.5; white-space: pre-wrap; word-break: break-word;">{text}</div>
+        <div class="tweet-body">{text}</div>
     </div>
     """
     return tweet_html
@@ -519,10 +707,10 @@ else:
         
     # --- Top Row: Signal Advisor Banner ---
     st.markdown(f"""
-    <div class="metric-card {signal_class}" style="text-align: left; margin-bottom: 25px;">
+    <div class="metric-card {signal_class}" style="text-align: left; margin-bottom: 25px; padding: 24px;">
         <div class="signal-title">Automated Trading Signal</div>
         <div class="signal-value" style="color: {signal_color};">{signal}</div>
-        <p style="margin-top: 10px; font-size: 1.1rem; line-height: 1.6; color: #dddddd;">
+        <p class="signal-description">
             {advisor_text}
         </p>
     </div>
@@ -534,28 +722,28 @@ else:
     with col1:
         # WSI Metric Card
         st.markdown(f"""
-        <div class="metric-card" style="height: 280px;">
-            <h3 style="color: #888888; font-size: 1.1rem; letter-spacing: 1px; margin-top: 10px;">WEIGHTED SENTIMENT INDEX (WSI)</h3>
-            <h1 style="font-size: 3.5rem; font-weight: 800; margin: 15px 0; color: {'#00ff7f' if latest_wsi > 0 else '#ff4b4b'};">
+        <div class="metric-card kpi-card">
+            <div class="kpi-title">WEIGHTED SENTIMENT INDEX (WSI)</div>
+            <div class="kpi-value" style="color: {'#00ff7f' if latest_wsi > 0 else '#ff4b4b'};">
                 {latest_wsi:+.4f}
-            </h1>
-            <p style="color: #aaaaaa; font-size: 0.9rem;">
+            </div>
+            <div class="kpi-desc">
                 Follower-Weighted Difference between Positive and Negative tweet lexicons.
-            </p>
+            </div>
         </div>
         """, unsafe_allow_html=True)
         
     with col2:
         # Z-Score Metric Card
         st.markdown(f"""
-        <div class="metric-card" style="height: 280px;">
-            <h3 style="color: #888888; font-size: 1.1rem; letter-spacing: 1px; margin-top: 10px;">NEGATIVITY Z-SCORE</h3>
-            <h1 style="font-size: 3.5rem; font-weight: 800; margin: 15px 0; color: {'#ff4b4b' if latest_z > 2.5 else '#aaaaaa'};">
+        <div class="metric-card kpi-card">
+            <div class="kpi-title">NEGATIVITY Z-SCORE</div>
+            <div class="kpi-value" style="color: {'#ff4b4b' if latest_z > 2.5 else '#aaaaaa'};">
                 {latest_z:+.2f}
-            </h1>
-            <p style="color: #aaaaaa; font-size: 0.9rem;">
+            </div>
+            <div class="kpi-desc">
                 Number of Standard Deviations the current negative sentiment is above its 10-window rolling mean.
-            </p>
+            </div>
         </div>
         """, unsafe_allow_html=True)
         
@@ -673,7 +861,7 @@ else:
                 ))
             
             feed_html = f"""
-            <div style="max-height: 550px; overflow-y: auto; padding-right: 8px; border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 16px; background: rgba(0, 0, 0, 0.1); padding: 12px;">
+            <div class="tweet-feed-container">
                 {"".join(tweets_html_list)}
             </div>
             """
@@ -710,7 +898,7 @@ else:
             for _, row in panics.head(3).iterrows():
                 time_str = pd.to_datetime(row['window_start']).strftime("%Y-%m-%d %H:%M:%S")
                 panic_html_list.append(f"""
-                <div style="background: rgba(255, 75, 75, 0.08); border: 1px solid rgba(255, 75, 75, 0.2); border-radius: 8px; padding: 10px; margin-bottom: 8px;">
+                <div class="panic-log-card">
                     <span style="color: #ff4b4b; font-weight: bold;">⚠️ {time_str}</span><br>
                     <span style="font-size: 0.9rem; color: #dddddd;">Z-Score: <b>{row['z_score']:.2f}</b> | Negativity: <b>{row['avg_neg']:.4f}</b></span>
                 </div>
