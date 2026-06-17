@@ -14,7 +14,7 @@ The pipeline is split into a scalable data processing backend (Databricks) and a
 
 ``` mermaid
 graph TD
-    subgraph Databricks Backend (Serverless Spark Compute)
+    subgraph "Databricks Backend (Serverless Spark Compute)"
         A[Kaggle CSV Source] -->|Background Chunker Thread| B[JSON Micro-batches in Unity Catalog Volume]
         B -->|PySpark Structured Streaming| C[NLP Normalization]
         C -->|Pandas UDF Sentiment Classifier| D[NLTK VADER Inference]
@@ -23,12 +23,12 @@ graph TD
         D -->|foreachBatch Sink 2| G[Push important_tweets.csv to GitHub API]
     end
 
-    subgraph GitHub Repository
+    subgraph "GitHub Repository"
         F --> H(aggregated_metrics.csv)
         G --> I(important_tweets.csv)
     end
 
-    subgraph Streamlit Live Dashboard
+    subgraph "Streamlit Live Dashboard"
         H -->|GitHub Contents API / Raw URL| J[Streamlit Ingestion Engine]
         I -->|GitHub Contents API / Raw URL| J
         J --> K[Real-Time Visualization & Alert Panel]
