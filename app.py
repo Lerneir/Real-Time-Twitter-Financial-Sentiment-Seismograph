@@ -127,10 +127,12 @@ data_source = st.sidebar.selectbox(
 # Configuration variables
 github_url = ""
 uploaded_file = None
+github_token = ""
 
 if data_source == "Live Databricks Pipeline (via GitHub)":
     st.sidebar.markdown("### GitHub Repository Sync")
     repo = st.sidebar.text_input("Repository Path (owner/repo)", "Lerneir/Real-Time-Twitter-Financial-Sentiment-Seismograph")
+    github_token = st.sidebar.text_input("GitHub Token (optional)", type="password", help="Providing a token enables instant updates (bypassing GitHub's 5-minute CDN cache) and increases API rate limits.")
     file_path = st.sidebar.text_input("Metrics File Name", "aggregated_metrics.csv")
     tweets_file_name = st.sidebar.text_input("Tweets File Name", "important_tweets.csv")
     branch = st.sidebar.text_input("Target Branch", "main")
@@ -225,6 +227,44 @@ if 'demo_tweets' not in st.session_state:
         })
     st.session_state['demo_tweets'] = pd.DataFrame(initial_tweets)
 
+def fetch_from_github_api(repo, branch, file_path, token=None):
+    headers = {
+        "Accept": "application/vnd.github.v3+json"
+    }
+    if token and token.strip() != "":
+        headers["Authorization"] = f"token {token.strip()}"
+        
+    url = f"https://api.github.com/repos/{repo}/contents/{file_path}"
+    params = {"ref": branch} if branch else {}
+    
+    try:
+        r = requests.get(url, headers=headers, params=params)
+        if r.status_code == 200:
+            import base64
+            content_b64 = r.json().get("content", "")
+            content_b64 = content_b64.replace("\n", "").replace("\r", "")
+            content_bytes = base64.b64decode(content_b64)
+            return content_bytes.decode("utf-8"), None
+        else:
+            return None, f"HTTP {r.status_code}"
+    except Exception as e:
+        return None, str(e)
+
+def fetch_raw_github(github_url):
+    try:
+        cache_bypassed_url = f"{github_url}?t={int(time.time())}"
+        headers = {
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0"
+        }
+        r = requests.get(cache_bypassed_url, headers=headers)
+        if r.status_code == 200:
+            return r.text, None
+        return None, f"HTTP {r.status_code}"
+    except Exception as e:
+        return None, str(e)
+
 # --- Fetch and Clean Metrics Data ---
 def load_data():
     if data_source == "Mock Stream (Local Emulation)":
@@ -305,22 +345,22 @@ def load_data():
         return df, tweets_df, None
         
     elif data_source == "Live Databricks Pipeline (via GitHub)":
-        if not github_url or not repo or repo.strip() == "" or repo == "username/repo":
+        if not repo or repo.strip() == "" or repo == "username/repo":
             return None, None, "Please configure your actual GitHub repository credentials in the sidebar."
         try:
-            # Prevent caching by appending a timestamp and using cache-busting headers
-            cache_bypassed_url = f"{github_url}?t={int(time.time())}"
-            headers = {
-                "Cache-Control": "no-cache, no-store, must-revalidate",
-                "Pragma": "no-cache",
-                "Expires": "0"
-            }
-            r = requests.get(cache_bypassed_url, headers=headers)
-            if r.status_code != 200:
-                return None, None, f"Failed to fetch CSV from GitHub: HTTP {r.status_code}. Ensure the file exists and repository is public."
+            # Fetch metrics CSV
+            if github_token and github_token.strip() != "":
+                csv_text, err = fetch_from_github_api(repo, branch, file_path, github_token)
+                if err:
+                    return None, None, f"Failed to fetch metrics via GitHub API: {err}. Check your token and repo path."
+            else:
+                github_url = f"https://raw.githubusercontent.com/{repo}/{branch}/{file_path}"
+                csv_text, err = fetch_raw_github(github_url)
+                if err:
+                    return None, None, f"Failed to fetch metrics via Raw URL: {err}. Consider entering a GitHub Token in the sidebar to bypass caching and prevent rate limits."
             
             import io
-            df = pd.read_csv(io.StringIO(r.text))
+            df = pd.read_csv(io.StringIO(csv_text))
             # Basic validation
             required_cols = ['window_start', 'window_end', 'wsi', 'avg_neg', 'z_score', 'tweet_count']
             if not all(col in df.columns for col in required_cols):
@@ -332,18 +372,27 @@ def load_data():
             # Fetch tweets from GitHub
             tweets_df = None
             if repo and tweets_file_name:
-                tweets_url = f"https://raw.githubusercontent.com/{repo}/{branch}/{tweets_file_name}"
-                tweets_cache_bypassed_url = f"{tweets_url}?t={int(time.time())}"
-                r_tweets = requests.get(tweets_cache_bypassed_url, headers=headers)
-                if r_tweets.status_code == 200:
-                    try:
-                        tweets_df = pd.read_csv(io.StringIO(r_tweets.text))
-                        # Basic validation
-                        required_tweets_cols = ['text', 'followers', 'timestamp', 'compound']
-                        if not all(col in tweets_df.columns for col in required_tweets_cols):
-                            tweets_df = None
-                    except Exception as e:
-                        print(f"Error parsing tweets: {e}")
+                if github_token and github_token.strip() != "":
+                    tweets_csv_text, err_tweets = fetch_from_github_api(repo, branch, tweets_file_name, github_token)
+                    if not err_tweets:
+                        try:
+                            tweets_df = pd.read_csv(io.StringIO(tweets_csv_text))
+                        except Exception as e:
+                            print(f"Error parsing tweets: {e}")
+                else:
+                    tweets_url = f"https://raw.githubusercontent.com/{repo}/{branch}/{tweets_file_name}"
+                    tweets_csv_text, err_tweets = fetch_raw_github(tweets_url)
+                    if not err_tweets:
+                        try:
+                            tweets_df = pd.read_csv(io.StringIO(tweets_csv_text))
+                        except Exception as e:
+                            print(f"Error parsing tweets: {e}")
+            
+            # Validate tweets_df columns if loaded
+            if tweets_df is not None:
+                required_tweets_cols = ['text', 'followers', 'timestamp', 'compound']
+                if not all(col in tweets_df.columns for col in required_tweets_cols):
+                    tweets_df = None
             
             return df.sort_values(by='window_start').reset_index(drop=True), tweets_df, None
         except Exception as e:
