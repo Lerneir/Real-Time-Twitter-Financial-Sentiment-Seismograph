@@ -61,20 +61,37 @@ dbutils.widgets.text("csv_source_path", "/Workspace/Shared/Real-Time-Twitter-Fin
 
 # Configure Spark to use Eastern Time for all timestamps
 spark.conf.set("spark.sql.session.timeZone", "America/New_York")
-print("[CONFIG] Spark timezone set to: America/New_York (Eastern Time)")
+print("[CONFIG] Spark timezone set t4o: America/New_York (Eastern Time)")
 
 # Resolve workspace paths
 import os
 
-# Use absolute paths directly - incoming files can be in /Workspace/ (read-only is OK for reading)
-incoming_dir = "/Workspace/Shared/Real-Time-Twitter-Financial-Sentiment-Seismograph/tmp/tweets/incoming"
+# Auto-create Unity Catalog infrastructure if it doesn't exist
+print("\n[SETUP] Ensuring Unity Catalog infrastructure exists...")
+try:
+    # Create dedicated catalog for this project
+    spark.sql("CREATE CATALOG IF NOT EXISTS twitter_streaming")
+    print("[SETUP] ✓ Catalog 'twitter_streaming' ready")
+    
+    spark.sql("CREATE SCHEMA IF NOT EXISTS twitter_streaming.default")
+    print("[SETUP] ✓ Schema 'twitter_streaming.default' ready")
+    
+    # Create volume if it doesn't exist
+    spark.sql("CREATE VOLUME IF NOT EXISTS twitter_streaming.default.checkpoints")
+    print("[SETUP] ✓ Volume 'twitter_streaming.default.checkpoints' ready")
+    
+    print("[SETUP] ✓ All Unity Catalog infrastructure verified and ready")
+except Exception as e:
+    print(f"[SETUP] ⚠ Warning creating UC infrastructure: {e}")
+    print("[SETUP] Note: Volume paths will be created automatically on first write")
 
-# CRITICAL: Checkpoint directory MUST be in a writable location for Spark state stores
-# Using Unity Catalog Volumes - writable on serverless compute
+# CRITICAL: All paths MUST be in Unity Catalog Volumes for serverless compute write access
+# Using dedicated twitter_streaming catalog
+incoming_dir = "/Volumes/twitter_streaming/default/checkpoints/incoming"
 checkpoint_dir = "/Volumes/twitter_streaming/default/checkpoints/tweets"
 checkpoint_tweets_dir = "/Volumes/twitter_streaming/default/checkpoints/tweets_raw"
 
-# Local CSV output path - Unity Catalog Volumes
+# Local CSV output paths - Unity Catalog Volumes
 local_csv_path = "/Volumes/twitter_streaming/default/checkpoints/aggregated_metrics.csv"
 local_tweets_csv_path = "/Volumes/twitter_streaming/default/checkpoints/important_tweets.csv"
 
@@ -116,7 +133,7 @@ def run_chunker(csv_path, output_dir, chunk_size, interval, max_duration=1800):
     print(f"[EMULATOR] Will run for maximum {max_duration // 60} minutes")
     emulator_start_time = time.time()
     try:
-        # Robust path simplification for Python within Databricks Workspace
+        # Robust path simplification for Python within Databricks
         real_csv_path = csv_path
         real_output_dir = output_dir
         
@@ -124,8 +141,17 @@ def run_chunker(csv_path, output_dir, chunk_size, interval, max_duration=1800):
         if real_csv_path.startswith("dbfs:/"):
             real_csv_path = real_csv_path.replace("dbfs:/", "/dbfs/")
             
-        # Ensure the destination directory exists in the Workspace without touching /dbfs
-        os.makedirs(real_output_dir, exist_ok=True)
+        # For Unity Catalog Volumes, use dbutils to ensure directory exists
+        if real_output_dir.startswith("/Volumes/"):
+            try:
+                # Unity Catalog Volumes: create directory via dbutils
+                dbutils.fs.mkdirs(real_output_dir)
+                print(f"[EMULATOR] Created Volume directory: {real_output_dir}")
+            except Exception as vol_err:
+                print(f"[EMULATOR] Volume directory creation: {vol_err} (may already exist)")
+        else:
+            # Regular filesystem paths
+            os.makedirs(real_output_dir, exist_ok=True)
         
         # Load the Twitter data
         if not os.path.exists(real_csv_path):
@@ -272,35 +298,15 @@ try:
     except:
         pass
     
-    # Clean and create incoming directory (this one is in /Workspace/)
-    if os.path.exists(incoming_dir):
-        shutil.rmtree(incoming_dir)
-        print("[INIT] ✓ Cleared old incoming files")
-    
-    # Create full directory path including all parent directories
-    os.makedirs(incoming_dir, exist_ok=True)
-    
-    # Verify the directory was actually created
-    if not os.path.exists(incoming_dir):
-        raise Exception(f"Failed to create incoming directory: {incoming_dir}")
-    
-    # Verify write permissions by creating a test file
-    test_file = os.path.join(incoming_dir, ".test_write")
+    # Clean incoming directory (now in Unity Catalog Volumes)
     try:
-        with open(test_file, "w") as f:
-            f.write("test")
-        os.remove(test_file)
-        print(f"[INIT] ✓ Incoming directory initialized with write permissions: {incoming_dir}")
-    except Exception as perm_err:
-        raise Exception(f"No write permissions in incoming directory: {incoming_dir}. Error: {perm_err}")
+        dbutils.fs.rm(incoming_dir, True)
+        print("[INIT] ✓ Cleared old incoming files")
+    except:
+        print("[INIT] ✓ Incoming directory will be created on first use")
     
-    # Unity Catalog Volumes directories are created automatically - no need to create them
+    # Unity Catalog Volumes directories are created automatically when files are written
     print("[INIT] ✓ Unity Catalog Volumes paths configured")
-    
-    # Verify incoming directory is ready
-    if os.path.exists(incoming_dir):
-        existing_files = os.listdir(incoming_dir)
-        print(f"[INIT] ✓ Incoming directory has {len(existing_files)} existing files")
     
 except Exception as e:
     print(f"[INIT] ⚠ Warning during workspace initialization: {e}")
@@ -681,7 +687,9 @@ print(f" -> Synchronizing target repository: {git_repo} [{git_branch}]")
 print(f" -> Target metrics output file:    {git_file}")
 print(f" -> Target tweets output file:     {git_tweets_file}")
 
-# Step 2: Clear checkpoint directories for a clean processing run
+# Step 2: Clear checkpoint directories for fresh processing run (catalog already created in Cell 5)
+
+# Clear checkpoint directories for a clean processing run
 try:
     dbutils.fs.rm(checkpoint_dir, True)
     print("[CHECKPOINT] Cleared metrics checkpoint directory for fresh processing run")
